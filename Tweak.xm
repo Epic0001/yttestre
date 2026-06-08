@@ -379,7 +379,7 @@ static void dyld_callback(const struct mach_header *mh, intptr_t slide) {
                     ? [seenAccounts componentsJoinedByString:@", "]
                     : @"(none)";
                 NSString *msg = [NSString stringWithFormat:
-                    @"v21 Diagnostics\n\n"
+                    @"v22 Diagnostics\n\n"
                     @"fishhook result: %d (0=OK)\n"
                     @"SecItemCopyMatching total: %d\n"
                     @"  for YTK service: %d ← MUST BE >0\n"
