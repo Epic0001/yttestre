@@ -113,25 +113,14 @@ static OSStatus hook_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *resul
     @autoreleasepool {
         if (!real_SecItemCopyMatching) resolveRealSecItem();
         hook_copy_count++;
-        if (!ytkPlusFound) return real_SecItemCopyMatching(query, result);
+
+        // NO ytkPlusFound guard — DYLD_INTERPOSE fires BEFORE our constructor,
+        // so YTKPlus's constructor calls hit this hook while ytkPlusFound is still NO.
+        // The service name check below is sufficient to avoid intercepting non-YTK calls.
 
         NSDictionary *dict = (__bridge NSDictionary *)query;
         NSString *service = dict[(__bridge id)kSecAttrService];
         NSString *account = dict[(__bridge id)kSecAttrAccount];
-
-        // Log EVERY service+account pair YTKPlus queries (regardless of match)
-        NSString *pair = [NSString stringWithFormat:@"%@ / %@",
-                          service ?: @"(no service)", account ?: @"(no account)"];
-        if (seenServiceAccountPairs && ![seenServiceAccountPairs containsObject:pair] && seenServiceAccountPairs.count < 50) {
-            @synchronized(seenServiceAccountPairs) {
-                if (![seenServiceAccountPairs containsObject:pair]) [seenServiceAccountPairs addObject:pair];
-            }
-        }
-        if (service && seenServices && ![seenServices containsObject:service] && seenServices.count < 30) {
-            @synchronized(seenServices) {
-                if (![seenServices containsObject:service]) [seenServices addObject:service];
-            }
-        }
 
         if (![service isEqualToString:kService]) {
             return real_SecItemCopyMatching(query, result);
@@ -176,7 +165,6 @@ static OSStatus hook_SecItemDelete(CFDictionaryRef query) {
     @autoreleasepool {
         if (!real_SecItemDelete) resolveRealSecItem();
         hook_delete_count++;
-        if (!ytkPlusFound) return real_SecItemDelete(query);
 
         NSDictionary *dict = (__bridge NSDictionary *)query;
         NSString *service = dict[(__bridge id)kSecAttrService];
@@ -191,7 +179,6 @@ static OSStatus hook_SecItemAdd(CFDictionaryRef attributes, CFTypeRef *result) {
     @autoreleasepool {
         if (!real_SecItemAdd) resolveRealSecItem();
         hook_add_count++;
-        if (!ytkPlusFound) return real_SecItemAdd(attributes, result);
 
         NSDictionary *dict = (__bridge NSDictionary *)attributes;
         NSString *service = dict[(__bridge id)kSecAttrService];
