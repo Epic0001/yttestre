@@ -378,17 +378,40 @@ static void dyld_callback(const struct mach_header *mh, intptr_t slide) {
                 NSString *accountsList = seenAccounts.count > 0
                     ? [seenAccounts componentsJoinedByString:@", "]
                     : @"(none)";
+                // Verify keychain pre-seed by reading back
+                NSDictionary *readQuery = @{
+                    (__bridge id)kSecClass:       (__bridge id)kSecClassGenericPassword,
+                    (__bridge id)kSecAttrService: kService,
+                    (__bridge id)kSecAttrAccount: @"Etmvdvihq chmhc rml",
+                    (__bridge id)kSecReturnData:  @YES,
+                    (__bridge id)kSecMatchLimit:   (__bridge id)kSecMatchLimitOne,
+                };
+                CFTypeRef readResult = NULL;
+                OSStatus readStatus = -999;
+                if (real_SecItemCopyMatching) {
+                    readStatus = real_SecItemCopyMatching((__bridge CFDictionaryRef)readQuery, &readResult);
+                }
+                NSString *statusKeyValue = @"(read failed)";
+                if (readStatus == errSecSuccess && readResult) {
+                    NSData *d = (__bridge_transfer NSData *)readResult;
+                    statusKeyValue = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding] ?: @"(decode failed)";
+                } else {
+                    statusKeyValue = [NSString stringWithFormat:@"OSStatus %d", (int)readStatus];
+                }
+
                 NSString *msg = [NSString stringWithFormat:
                     @"v22 Diagnostics\n\n"
-                    @"fishhook result: %d (0=OK)\n"
-                    @"SecItemCopyMatching total: %d\n"
-                    @"  for YTK service: %d ← MUST BE >0\n"
-                    @"SecItemDelete: %d, SecItemAdd: %d\n\n"
-                    @"YTK accounts seen:\n  %@\n\n"
-                    @"If 'for YTK service' is 0, hooks aren't\n"
-                    @"catching YTKPlus calls → bVar1=false\n"
-                    @"→ no premium features.\n\n"
+                    @"Keychain pre-seed:\n"
+                    @"  status key = \"%@\"\n"
+                    @"  (should be \"1\")\n\n"
+                    @"Hook stats:\n"
+                    @"  fishhook: %d (0=OK)\n"
+                    @"  SecItemCopy total: %d\n"
+                    @"  for YTK: %d\n"
+                    @"  Del: %d, Add: %d\n\n"
+                    @"YTK accounts: %@\n\n"
                     @"Made by itzzace",
+                    statusKeyValue,
                     fishhook_result,
                     hook_copy_count, hook_copy_ytk_count,
                     hook_delete_count, hook_add_count,
@@ -431,22 +454,87 @@ static void dyld_callback(const struct mach_header *mh, intptr_t slide) {
 }
 
 // ============================================================
+#pragma mark — Write real keychain values (pre-seed)
+// ============================================================
+// Since DYLD_INTERPOSE and fishhook can't reliably intercept YTKPlus's
+// SecItemCopyMatching (constructor ordering), we write REAL values to
+// the keychain BEFORE YTKPlus reads them. This makes bVar1=true so
+// YTKPlus installs all ~100 premium hooks itself.
+//
+// Key insight: auth_integrity_seal must NOT exist (or be empty).
+// This causes the HMAC check to be SKIPPED → bVar1=true.
+
+static void writeKeychainValue(NSString *account, NSString *value) {
+    resolveRealSecItem();
+    // Delete existing
+    NSDictionary *delQuery = @{
+        (__bridge id)kSecClass:       (__bridge id)kSecClassGenericPassword,
+        (__bridge id)kSecAttrService: kService,
+        (__bridge id)kSecAttrAccount: account,
+    };
+    real_SecItemDelete((__bridge CFDictionaryRef)delQuery);
+
+    if (!value) return; // just delete
+
+    // Add new
+    NSDictionary *addQuery = @{
+        (__bridge id)kSecClass:       (__bridge id)kSecClassGenericPassword,
+        (__bridge id)kSecAttrService: kService,
+        (__bridge id)kSecAttrAccount: account,
+        (__bridge id)kSecValueData:   [value dataUsingEncoding:NSUTF8StringEncoding],
+        (__bridge id)kSecAttrAccessible: (__bridge id)kSecAttrAccessibleAfterFirstUnlock,
+    };
+    OSStatus status = real_SecItemAdd((__bridge CFDictionaryRef)addQuery, NULL);
+    LOG(@"Keychain write %@ = \"%@\" → %d", account, value, (int)status);
+}
+
+static void preseedKeychain(void) {
+    LOG(@"=== Pre-seeding keychain values ===");
+
+    // The obfuscated activation status key (built by FUN_0004682c, 19 chars)
+    // From Ghidra analysis: "Etmvdvihq chmhc rml"
+    writeKeychainValue(@"Etmvdvihq chmhc rml", @"1");
+
+    // Standard known keys
+    writeKeychainValue(kEnabledStatus,    @"1");
+    writeKeychainValue(kActivationLogged, @"1");
+    writeKeychainValue(kStatsSent,        @"1");
+    writeKeychainValue(kAuthEmail,        @"bypass@ytk.local");
+    writeKeychainValue(kAuthLicense,      @"BYPASS-0000-0000-0000");
+    writeKeychainValue(kAuthDevice,       @"FAKEDEVICE-V22");
+    writeKeychainValue(kAuthExpires,      @"01-01-2030 12:00 AM");
+    writeKeychainValue(kAuthSessionToken, @"FAKETOKEN-V22");
+    writeKeychainValue(kAuthTimestamp,    @"9999999999");
+
+    // DELETE seal keys — forces HMAC check to be SKIPPED (both must have
+    // length > 0 for the check to run). Without seal → bVar1=true.
+    writeKeychainValue(kAuthSeal,     nil);
+    writeKeychainValue(kAuthLastSeal, nil);
+
+    LOG(@"=== Keychain pre-seed complete ===");
+}
+
+// ============================================================
 #pragma mark — Constructor
 // ============================================================
 __attribute__((constructor))
 static void init(void) {
     @try {
-        LOG(@"=== v20 substrate-free init + service diagnostics ===");
+        LOG(@"=== v22 init ===");
         seenAccounts = [NSMutableArray new];
         seenServices = [NSMutableArray new];
         seenServiceAccountPairs = [NSMutableArray new];
 
-        // Resolve real SecItem pointers (interposers are auto-installed by dyld)
+        // Resolve real SecItem pointers
         resolveRealSecItem();
         LOG(@"SecItem real ptrs: copy=%p del=%p add=%p",
             real_SecItemCopyMatching, real_SecItemDelete, real_SecItemAdd);
 
-        // Swizzle UIViewController presentViewController:animated:completion:
+        // STRATEGY 1: Write real keychain values BEFORE YTKPlus reads them.
+        // This is the primary mechanism — works regardless of hook timing.
+        preseedKeychain();
+
+        // Swizzle UIViewController to suppress license alerts
         Class vcClass = [UIViewController class];
         if (vcClass) {
             swizzleInstanceMethod(vcClass,
@@ -455,11 +543,12 @@ static void init(void) {
             LOG(@"UIViewController.presentViewController swizzled");
         }
 
-        // Register dyld callback for YTKPlus detection
+        // STRATEGY 2: DYLD_INTERPOSE + fishhook as belt-and-suspenders.
+        // Catches any keychain reads/deletes/writes that happen AFTER our init.
         _dyld_register_func_for_add_image(dyld_callback);
         LOG(@"dyld callback registered");
 
-        LOG(@"=== v16 init complete ===");
+        LOG(@"=== v22 init complete ===");
     } @catch (NSException *e) {
         LOG(@"init EXCEPTION: %@", e);
     }
