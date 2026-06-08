@@ -49,6 +49,7 @@ static _Atomic int hook_copy_count = 0;
 static _Atomic int hook_copy_ytk_count = 0;
 static _Atomic int hook_delete_count = 0;
 static _Atomic int hook_add_count = 0;
+static int fishhook_result = -999;
 static NSMutableArray *seenAccounts = nil;
 
 // ============================================================
@@ -312,8 +313,8 @@ static void dyld_callback(const struct mach_header *mh, intptr_t slide) {
             { "SecItemDelete",        (void *)hook_SecItemDelete,        (void **)&real_SecItemDelete },
             { "SecItemAdd",           (void *)hook_SecItemAdd,           (void **)&real_SecItemAdd },
         };
-        int rb_result = rebind_symbols_image((void *)mh, slide, rebs, 3);
-        LOG(@"fishhook rebind_symbols_image returned %d", rb_result);
+        fishhook_result = rebind_symbols_image((void *)mh, slide, rebs, 3);
+        LOG(@"fishhook rebind_symbols_image returned %d", fishhook_result);
 
         // Phase 3: Wait for YTKPlus constructor to create runtime classes, then swizzle
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
@@ -359,13 +360,16 @@ static void dyld_callback(const struct mach_header *mh, intptr_t slide) {
                     ? [seenAccounts componentsJoinedByString:@"\n  "]
                     : @"(none — interpose not working!)";
                 NSString *msg = [NSString stringWithFormat:
-                    @"v18 Diagnostics\n\n"
+                    @"v19 Diagnostics\n\n"
+                    @"fishhook rebind result: %d\n"
+                    @"  (0=success, -1=fail, -999=never ran)\n\n"
                     @"SecItemCopyMatching total: %d\n"
                     @"  → for YTK service: %d\n"
                     @"SecItemDelete total: %d\n"
                     @"SecItemAdd total: %d\n\n"
                     @"YTK accounts queried:\n  %@\n\n"
                     @"Made by itzzace",
+                    fishhook_result,
                     hook_copy_count, hook_copy_ytk_count,
                     hook_delete_count, hook_add_count,
                     accountList];
