@@ -209,6 +209,72 @@ static void hook_openCheckLicense(id self, SEL _cmd) {
 }
 
 // ============================================================
+#pragma mark — Force "Active" state in settings page
+// ============================================================
+// Walks the cell after the original configures it, forces switch ON
+// and rewrites any "Inactive" / "Verify License" labels to green "Active"
+static void forceCellActive(UITableViewCell *cell) {
+    if (!cell) return;
+
+    // Find UISwitch in accessoryView
+    if ([cell.accessoryView isKindOfClass:[UISwitch class]]) {
+        UISwitch *sw = (UISwitch *)cell.accessoryView;
+        [sw setOn:YES animated:NO];
+        sw.enabled = YES;
+    }
+    // Walk all subviews recursively
+    NSMutableArray *queue = [NSMutableArray arrayWithObject:cell];
+    while (queue.count > 0) {
+        UIView *v = queue.firstObject;
+        [queue removeObjectAtIndex:0];
+        for (UIView *sub in v.subviews) [queue addObject:sub];
+
+        if ([v isKindOfClass:[UISwitch class]]) {
+            [(UISwitch *)v setOn:YES animated:NO];
+            ((UISwitch *)v).enabled = YES;
+        }
+        if ([v isKindOfClass:[UILabel class]]) {
+            UILabel *lbl = (UILabel *)v;
+            NSString *text = lbl.text ?: @"";
+            NSString *lower = text.lowercaseString;
+            if ([lower containsString:@"inactive"] ||
+                [lower containsString:@"verify license"] ||
+                [lower containsString:@"not verified"] ||
+                [lower containsString:@"disabled"] ||
+                [lower containsString:@"not active"]) {
+                lbl.text = @"Active (Verified)";
+                lbl.textColor = [UIColor colorWithRed:0.2 green:0.8 blue:0.2 alpha:1.0];
+            }
+        }
+    }
+}
+
+static void (*orig_configureEnabledCell)(id, SEL, id) = NULL;
+static void hook_configureEnabledCell(id self, SEL _cmd, id cell) {
+    if (orig_configureEnabledCell) {
+        orig_configureEnabledCell(self, _cmd, cell);
+    }
+    if ([cell isKindOfClass:[UITableViewCell class]]) {
+        forceCellActive((UITableViewCell *)cell);
+        // Also patch again on next runloop in case YTKPlus updates async
+        dispatch_async(dispatch_get_main_queue(), ^{
+            forceCellActive((UITableViewCell *)cell);
+        });
+    }
+}
+
+// Also hook tableView:cellForRowAtIndexPath: as a catch-all
+static UITableViewCell *(*orig_cellForRowAtIndexPath)(id, SEL, UITableView *, NSIndexPath *) = NULL;
+static UITableViewCell *hook_cellForRowAtIndexPath(id self, SEL _cmd,
+                                                    UITableView *tv, NSIndexPath *ip) {
+    UITableViewCell *cell = orig_cellForRowAtIndexPath
+        ? orig_cellForRowAtIndexPath(self, _cmd, tv, ip)
+        : nil;
+    forceCellActive(cell);
+    return cell;
+}
+
+// ============================================================
 #pragma mark — Dyld image callback
 // ============================================================
 static void dyld_callback(const struct mach_header *mh, intptr_t slide) {
@@ -242,6 +308,20 @@ static void dyld_callback(const struct mach_header *mh, intptr_t slide) {
                 swizzleInstanceMethod(dc2, NSSelectorFromString(@"openCheckLicense"),
                                       (IMP)hook_openCheckLicense, &origIgnored);
                 LOG(@"DownloadsController2 swizzled");
+            }
+
+            // Force settings cells to show "Active"
+            Class roc = NSClassFromString(@"RootOptionsController");
+            if (roc) {
+                swizzleInstanceMethod(roc,
+                    NSSelectorFromString(@"configureEnabledCell:"),
+                    (IMP)hook_configureEnabledCell,
+                    (IMP *)&orig_configureEnabledCell);
+                swizzleInstanceMethod(roc,
+                    @selector(tableView:cellForRowAtIndexPath:),
+                    (IMP)hook_cellForRowAtIndexPath,
+                    (IMP *)&orig_cellForRowAtIndexPath);
+                LOG(@"RootOptionsController cell forcing installed");
             }
 
             // First-run welcome popup
