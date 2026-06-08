@@ -13,6 +13,5 @@ TWEAK_NAME = YTKActivator
 YTKActivator_FILES = Tweak.xm
 YTKActivator_CFLAGS = -fobjc-arc
 YTKActivator_FRAMEWORKS = UIKit Foundation Security
-YTKActivator_LIBRARIES = substrate
 
 include $(THEOS_MAKE_PATH)/tweak.mk

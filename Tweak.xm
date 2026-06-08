@@ -1,52 +1,36 @@
 /*
- *  YTKActivator v13 — SecItem-level bypass
+ *  YTKActivator v16 — Substrate-FREE for iOS 26 compatibility
  *
- *  KEY FIX: FUN_00046d48 must return 0 (not 1!) to prevent the server
- *  verification call. Returning 1 CAUSES the server call → "Invalid key" popup.
+ *  iOS 26 changes:
+ *    - CydiaSubstrate crashes on load (KERN_PROTECTION_FAILURE)
+ *    - MSHookFunction modifies code pages → SIGKILL by code signing monitor
  *
- *  Strategy:
- *    Phase 1 (our constructor, runs before YTKPlus):
- *      - Hook SecItemCopyMatching → return fake keychain values
- *      - Hook SecItemDelete / SecItemAdd → block for ytkplus service
- *      - Hook UIViewController presentViewController → suppress license alerts
- *      - Register _dyld_register_func_for_add_image callback
- *
- *    Phase 2 (dyld callback, fires when YTKPlus image is loaded):
- *      - Hook FUN_00046d48 at base+0x46d48 → return 0 (prevents server call)
- *      - dispatch_after 0.5s → Phase 3
- *
- *    Phase 3 (delayed, after YTKPlus constructor has run):
- *      - Hook DownloadsController settingsVerifyYkChecker_ → present settings
- *
- *  Why bVar1 = true (premium hooks installed):
- *    - Obfuscated status key reads "1" from our SecItem hook
- *    - auth_integrity_seal returns nil (not found)
- *    - length(nil) == 0 → HMAC check is SKIPPED
- *    - Falls through to bVar1 = true
- *
- *  Why no popup:
- *    - email/license/device/expires all present → enters verify path
- *    - session_token/timestamp present → doesn't short-circuit
- *    - FUN_00046d48 returns 0 → condition FALSE → clearAuth (blocked) → no server call
+ *  This build uses ZERO substrate APIs:
+ *    - SecItem hooks → DYLD_INTERPOSE (pure dyld metadata, no code patching)
+ *    - ObjC hooks → method_exchangeImplementations (modifies method table only)
+ *    - No FUN_xxxx binary patches (rely on keychain values alone for bVar1)
  */
+
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
 #import <Security/Security.h>
 #import <dlfcn.h>
 #import <mach-o/dyld.h>
-#import <mach-o/loader.h>
-#import <substrate.h>
+#import <objc/runtime.h>
+#import <objc/message.h>
+
 // ============================================================
 #pragma mark — Logging
 // ============================================================
 #define LOG(fmt, ...) NSLog(@"[YTKBypass] " fmt, ##__VA_ARGS__)
+
 // ============================================================
 #pragma mark — Constants
 // ============================================================
 static NSString *const kService = @"me.ikghd.ytkplus.secure";
 static NSString *const kFirstRunKey = @"com.itzzace.ytkactivator.firstRun";
 static BOOL ytkPlusFound = NO;
-// Known keychain account keys
+
 static NSString *const kAuthEmail        = @"auth_email_secure";
 static NSString *const kAuthLicense      = @"auth_license_secure";
 static NSString *const kAuthDevice       = @"auth_device_secure";
@@ -58,9 +42,9 @@ static NSString *const kAuthLastSeal     = @"auth_last_verified_seal";
 static NSString *const kEnabledStatus    = @"Enabledytk_status";
 static NSString *const kActivationLogged = @"activation_logged";
 static NSString *const kStatsSent        = @"stats_sent_before";
+
 // ============================================================
-// DYLD_INTERPOSE — replaces system functions via dyld metadata,
-// no code pages modified, passes iOS 26+ code signing monitor
+#pragma mark — DYLD_INTERPOSE macro
 // ============================================================
 #define DYLD_INTERPOSE(_replacement, _replacee) \
     __attribute__((used)) static struct { \
@@ -72,7 +56,9 @@ static NSString *const kStatsSent        = @"stats_sent_before";
         (const void *)(unsigned long)&_replacee \
     };
 
-// Look up real implementations on first call (bypasses our own interpose)
+// ============================================================
+#pragma mark — Real SecItem function pointers
+// ============================================================
 static OSStatus (*real_SecItemCopyMatching)(CFDictionaryRef, CFTypeRef *) = NULL;
 static OSStatus (*real_SecItemDelete)(CFDictionaryRef) = NULL;
 static OSStatus (*real_SecItemAdd)(CFDictionaryRef, CFTypeRef *) = NULL;
@@ -83,7 +69,6 @@ static void resolveRealSecItem(void) {
         real_SecItemCopyMatching = (OSStatus (*)(CFDictionaryRef, CFTypeRef *))dlsym(RTLD_NEXT, "SecItemCopyMatching");
         real_SecItemDelete       = (OSStatus (*)(CFDictionaryRef))dlsym(RTLD_NEXT, "SecItemDelete");
         real_SecItemAdd          = (OSStatus (*)(CFDictionaryRef, CFTypeRef *))dlsym(RTLD_NEXT, "SecItemAdd");
-        // Fall back to looking in Security.framework directly if RTLD_NEXT fails
         if (!real_SecItemCopyMatching) {
             void *sec = dlopen("/System/Library/Frameworks/Security.framework/Security", RTLD_NOW | RTLD_NOLOAD);
             if (sec) {
@@ -96,59 +81,38 @@ static void resolveRealSecItem(void) {
 }
 
 // ============================================================
-#pragma mark — Phase 1: SecItemCopyMatching hook
+#pragma mark — SecItem hooks (interposed)
 // ============================================================
+
 static OSStatus hook_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *result) {
     @autoreleasepool {
+        if (!real_SecItemCopyMatching) resolveRealSecItem();
         if (!ytkPlusFound) return real_SecItemCopyMatching(query, result);
 
         NSDictionary *dict = (__bridge NSDictionary *)query;
         NSString *service = dict[(__bridge id)kSecAttrService];
-
         if (![service isEqualToString:kService]) {
             return real_SecItemCopyMatching(query, result);
         }
 
         NSString *account = dict[(__bridge id)kSecAttrAccount];
 
-        // Keys that must return nil (not found) to skip HMAC checks
-        if ([account isEqualToString:kAuthSeal] ||
-            [account isEqualToString:kAuthLastSeal]) {
-            LOG(@"SecItemCopyMatching: %@ → NOT FOUND (skip HMAC)", account);
+        // Keys that must return nil to skip HMAC checks
+        if ([account isEqualToString:kAuthSeal] || [account isEqualToString:kAuthLastSeal]) {
             if (result) *result = NULL;
             return errSecItemNotFound;
         }
 
-        // Keys with specific fake values
         NSString *fakeValue = nil;
-
-        if ([account isEqualToString:kAuthEmail]) {
-            fakeValue = @"bypass@ytk.local";
-        } else if ([account isEqualToString:kAuthLicense]) {
-            fakeValue = @"BYPASS-0000-0000-0000";
-        } else if ([account isEqualToString:kAuthDevice]) {
-            fakeValue = @"FAKEDEVICE-BYPASS-V13";
-        } else if ([account isEqualToString:kAuthExpires]) {
-            fakeValue = @"01-01-2030 12:00 AM";
-        } else if ([account isEqualToString:kAuthSessionToken]) {
-            fakeValue = @"FAKETOKEN-BYPASS-V13";
-        } else if ([account isEqualToString:kAuthTimestamp]) {
-            fakeValue = @"9999999999";
-        } else if ([account isEqualToString:kEnabledStatus]) {
-            fakeValue = @"1";
-        } else if ([account isEqualToString:kActivationLogged]) {
-            fakeValue = @"1";
-        } else if ([account isEqualToString:kStatsSent]) {
-            fakeValue = @"1";
-        } else {
-            // Any unknown key (including obfuscated status keys) → "1"
-            fakeValue = @"1";
-        }
-
-        LOG(@"SecItemCopyMatching: %@ → \"%@\"", account ?: @"(nil account)", fakeValue);
+        if      ([account isEqualToString:kAuthEmail])        fakeValue = @"bypass@ytk.local";
+        else if ([account isEqualToString:kAuthLicense])      fakeValue = @"BYPASS-0000-0000-0000";
+        else if ([account isEqualToString:kAuthDevice])       fakeValue = @"FAKEDEVICE-BYPASS-V16";
+        else if ([account isEqualToString:kAuthExpires])      fakeValue = @"01-01-2030 12:00 AM";
+        else if ([account isEqualToString:kAuthSessionToken]) fakeValue = @"FAKETOKEN-BYPASS-V16";
+        else if ([account isEqualToString:kAuthTimestamp])    fakeValue = @"9999999999";
+        else                                                  fakeValue = @"1";
 
         if (result) {
-            // Check if caller wants data or attributes
             id returnType = dict[(__bridge id)kSecReturnData];
             if ([returnType boolValue]) {
                 NSData *data = [fakeValue dataUsingEncoding:NSUTF8StringEncoding];
@@ -160,244 +124,193 @@ static OSStatus hook_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *resul
         return errSecSuccess;
     }
 }
-// ============================================================
-#pragma mark — Phase 1: SecItemDelete hook
-// ============================================================
+
 static OSStatus hook_SecItemDelete(CFDictionaryRef query) {
     @autoreleasepool {
+        if (!real_SecItemDelete) resolveRealSecItem();
         if (!ytkPlusFound) return real_SecItemDelete(query);
 
         NSDictionary *dict = (__bridge NSDictionary *)query;
         NSString *service = dict[(__bridge id)kSecAttrService];
-
         if ([service isEqualToString:kService]) {
-            NSString *account = dict[(__bridge id)kSecAttrAccount];
-            LOG(@"SecItemDelete BLOCKED: %@", account ?: @"(all)");
-            return errSecSuccess; // pretend success
+            return errSecSuccess; // block
         }
         return real_SecItemDelete(query);
     }
 }
-// ============================================================
-#pragma mark — Phase 1: SecItemAdd hook
-// ============================================================
+
 static OSStatus hook_SecItemAdd(CFDictionaryRef attributes, CFTypeRef *result) {
     @autoreleasepool {
+        if (!real_SecItemAdd) resolveRealSecItem();
         if (!ytkPlusFound) return real_SecItemAdd(attributes, result);
 
         NSDictionary *dict = (__bridge NSDictionary *)attributes;
         NSString *service = dict[(__bridge id)kSecAttrService];
-
         if ([service isEqualToString:kService]) {
-            NSString *account = dict[(__bridge id)kSecAttrAccount];
-            LOG(@"SecItemAdd BLOCKED: %@", account ?: @"(unknown)");
             if (result) *result = NULL;
-            return errSecSuccess; // pretend success
+            return errSecSuccess; // block
         }
         return real_SecItemAdd(attributes, result);
     }
 }
 
-// Register the interpose entries — dyld will swap pointers at load time
 DYLD_INTERPOSE(hook_SecItemCopyMatching, SecItemCopyMatching)
-DYLD_INTERPOSE(hook_SecItemDelete, SecItemDelete)
-DYLD_INTERPOSE(hook_SecItemAdd, SecItemAdd)
+DYLD_INTERPOSE(hook_SecItemDelete,        SecItemDelete)
+DYLD_INTERPOSE(hook_SecItemAdd,           SecItemAdd)
+
 // ============================================================
-#pragma mark — Phase 1: UIViewController presentViewController hook
+#pragma mark — Native ObjC swizzle helper (no substrate)
 // ============================================================
-static void (*orig_presentVC)(UIViewController *, SEL, UIViewController *, BOOL, id);
-static void hook_presentVC(UIViewController *self, SEL _cmd,
-                           UIViewController *vc, BOOL animated, id completion) {
-    if (!ytkPlusFound) {
-        orig_presentVC(self, _cmd, vc, animated, completion);
-        return;
-    }
-    if ([vc isKindOfClass:[UIAlertController class]]) {
+static BOOL swizzleInstanceMethod(Class cls, SEL originalSel, IMP newImp, IMP *origImpOut) {
+    if (!cls) return NO;
+    Method m = class_getInstanceMethod(cls, originalSel);
+    if (!m) return NO;
+    IMP previous = method_setImplementation(m, newImp);
+    if (origImpOut) *origImpOut = previous;
+    return YES;
+}
+
+// ============================================================
+#pragma mark — UIViewController presentViewController swizzle
+// ============================================================
+static void (*orig_presentVC)(id, SEL, id, BOOL, id) = NULL;
+static void hook_presentVC(id self, SEL _cmd, id vc, BOOL animated, id completion) {
+    if (ytkPlusFound && [vc isKindOfClass:[UIAlertController class]]) {
         UIAlertController *alert = (UIAlertController *)vc;
         NSString *title   = alert.title   ?: @"";
         NSString *message = alert.message ?: @"";
-
-        // Suppress YTKPlus license-related alerts
         if ([title containsString:@"license_verification"] ||
             [title containsString:@"verification_passed"] ||
-            [title containsString:@"license_verification_passed"] ||
             [message containsString:@"Invalid key"] ||
             [message containsString:@"Invalid signature"] ||
             [message containsString:@"license_expired"] ||
             [message containsString:@"License Options"]) {
-            LOG(@"SUPPRESSED alert: title=\"%@\" message=\"%@\"", title, message);
-            return; // swallow the alert
+            LOG(@"Suppressed alert: %@", title);
+            return; // swallow
         }
     }
-    orig_presentVC(self, _cmd, vc, animated, completion);
+    if (orig_presentVC) orig_presentVC(self, _cmd, vc, animated, completion);
 }
-// ============================================================
-#pragma mark — Phase 3: Settings page hooks
-// ============================================================
-static void (*orig_settingsVerifyYkChecker)(id, SEL, id);
-static void hook_settingsVerifyYkChecker(id self, SEL _cmd, id param) {
-    LOG(@"settingsVerifyYkChecker_ intercepted → presenting RootOptionsController");
 
+// ============================================================
+#pragma mark — Settings page swizzle
+// ============================================================
+static void hook_settingsVerifyYkChecker(id self, SEL _cmd, id sender) {
     Class rootOptsClass = NSClassFromString(@"RootOptionsController");
-    if (!rootOptsClass) {
-        LOG(@"RootOptionsController class not found!");
-        return;
-    }
-
-    // Create settings VC (UITableViewController with grouped style)
+    if (!rootOptsClass) return;
     UITableViewController *settingsVC = [[rootOptsClass alloc] initWithStyle:UITableViewStyleGrouped];
     UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:settingsVC];
     nav.modalPresentationStyle = UIModalPresentationFullScreen;
-
     [self presentViewController:nav animated:YES completion:nil];
-    LOG(@"RootOptionsController presented successfully");
 }
-static void (*orig_openCheckLicense)(id, SEL);
+
 static void hook_openCheckLicense(id self, SEL _cmd) {
-    LOG(@"openCheckLicense intercepted → redirecting to settings");
     hook_settingsVerifyYkChecker(self, _cmd, nil);
 }
+
 // ============================================================
-#pragma mark — Dyld image callback (Phase 2)
+#pragma mark — Dyld image callback
 // ============================================================
 static void dyld_callback(const struct mach_header *mh, intptr_t slide) {
     @try {
         Dl_info info;
         if (!dladdr((const void *)mh, &info) || !info.dli_fname) return;
-
         NSString *path = [NSString stringWithUTF8String:info.dli_fname];
         if (![path containsString:@"YTKPlus"]) return;
 
-        LOG(@"=== Phase 2: YTKPlus found at %s (slide=0x%lx) ===", info.dli_fname, (long)slide);
-
+        LOG(@"YTKPlus.dylib loaded — SecItem interpose will fake activation");
         ytkPlusFound = YES;
 
-        // NOTE: We DO NOT MSHookFunction inside YTKPlus.dylib anymore.
-        // iOS 26+ code signing monitor kills the process when any loaded binary's
-        // code pages are modified — even third-party dylibs.
-        //
-        // Instead, we rely on:
-        //   1. SecItem DYLD_INTERPOSE → fakes keychain reads so bVar1 = true
-        //      (auth_integrity_seal returns nil → HMAC skipped → premium hooks install)
-        //   2. presentVC swizzle → suppresses "Invalid key" alert from failed server verify
-        //   3. settingsVerifyYkChecker swizzle → bypasses settings page check
-        LOG(@"YTKPlus detected — relying on SecItem interpose for bypass (no code patching)");
-
-    // Phase 3: Delayed hooks for runtime classes
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        LOG(@"=== Phase 3: Installing settings hooks ===");
-
-        Class dlClass = NSClassFromString(@"DownloadsController");
-        if (dlClass) {
-            // Hook settingsVerifyYkChecker: → present settings directly
-            SEL selVerify = NSSelectorFromString(@"settingsVerifyYkChecker:");
-            if ([dlClass instancesRespondToSelector:selVerify]) {
-                MSHookMessageEx(dlClass, selVerify,
-                                (IMP)hook_settingsVerifyYkChecker,
-                                (IMP *)&orig_settingsVerifyYkChecker);
-                LOG(@"Hooked DownloadsController settingsVerifyYkChecker:");
-            } else {
-                LOG(@"WARNING: settingsVerifyYkChecker: not found on DownloadsController");
+        // Phase 3: Wait for YTKPlus constructor to create runtime classes, then swizzle
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            Class dc = NSClassFromString(@"DownloadsController");
+            if (dc) {
+                IMP origIgnored = NULL;
+                swizzleInstanceMethod(dc, NSSelectorFromString(@"settingsVerifyYkChecker:"),
+                                      (IMP)hook_settingsVerifyYkChecker, &origIgnored);
+                swizzleInstanceMethod(dc, NSSelectorFromString(@"openCheckLicense"),
+                                      (IMP)hook_openCheckLicense, &origIgnored);
+                LOG(@"DownloadsController swizzled");
             }
 
-            // Hook openCheckLicense → redirect to settings
-            SEL selCheck = NSSelectorFromString(@"openCheckLicense");
-            if ([dlClass instancesRespondToSelector:selCheck]) {
-                MSHookMessageEx(dlClass, selCheck,
-                                (IMP)hook_openCheckLicense,
-                                (IMP *)&orig_openCheckLicense);
-                LOG(@"Hooked DownloadsController openCheckLicense");
+            Class dc2 = NSClassFromString(@"DownloadsController2");
+            if (dc2) {
+                IMP origIgnored = NULL;
+                swizzleInstanceMethod(dc2, NSSelectorFromString(@"settingsVerifyYkChecker:"),
+                                      (IMP)hook_settingsVerifyYkChecker, &origIgnored);
+                swizzleInstanceMethod(dc2, NSSelectorFromString(@"openCheckLicense"),
+                                      (IMP)hook_openCheckLicense, &origIgnored);
+                LOG(@"DownloadsController2 swizzled");
             }
-        } else {
-            LOG(@"WARNING: DownloadsController class not found");
-        }
 
-        // Also hook on DownloadsController2 if it exists
-        Class dlClass2 = NSClassFromString(@"DownloadsController2");
-        if (dlClass2) {
-            SEL selVerify = NSSelectorFromString(@"settingsVerifyYkChecker:");
-            if ([dlClass2 instancesRespondToSelector:selVerify]) {
-                MSHookMessageEx(dlClass2, selVerify,
-                                (IMP)hook_settingsVerifyYkChecker, NULL);
-                LOG(@"Hooked DownloadsController2 settingsVerifyYkChecker:");
+            // First-run welcome popup
+            NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+            if (![defaults boolForKey:kFirstRunKey]) {
+                [defaults setBool:YES forKey:kFirstRunKey];
+                [defaults synchronize];
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC),
+                               dispatch_get_main_queue(), ^{
+                    UIAlertController *welcome = [UIAlertController
+                        alertControllerWithTitle:@"YTKActivator"
+                        message:@"YTKPlus has been activated successfully.\n\nMade by itzzace"
+                        preferredStyle:UIAlertControllerStyleAlert];
+                    [welcome addAction:[UIAlertAction actionWithTitle:@"OK"
+                                        style:UIAlertActionStyleDefault handler:nil]];
+                    UIWindowScene *ws = nil;
+                    for (UIScene *s in [UIApplication sharedApplication].connectedScenes) {
+                        if ([s isKindOfClass:[UIWindowScene class]]) { ws = (UIWindowScene *)s; break; }
+                    }
+                    UIViewController *topVC = nil;
+                    for (UIWindow *w in ws.windows) {
+                        if (w.isKeyWindow) { topVC = w.rootViewController; break; }
+                    }
+                    while (topVC.presentedViewController) topVC = topVC.presentedViewController;
+                    if (topVC) {
+                        // Bypass our own presentVC hook by calling original directly
+                        if (orig_presentVC) {
+                            orig_presentVC(topVC, @selector(presentViewController:animated:completion:),
+                                           welcome, YES, nil);
+                        } else {
+                            [topVC presentViewController:welcome animated:YES completion:nil];
+                        }
+                    }
+                });
             }
-            SEL selCheck = NSSelectorFromString(@"openCheckLicense");
-            if ([dlClass2 instancesRespondToSelector:selCheck]) {
-                MSHookMessageEx(dlClass2, selCheck,
-                                (IMP)hook_openCheckLicense, NULL);
-                LOG(@"Hooked DownloadsController2 openCheckLicense");
-            }
-        }
-
-        LOG(@"=== Phase 3 complete ===");
-
-        // One-time welcome popup on first detection
-        NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-        if (![defaults boolForKey:kFirstRunKey]) {
-            [defaults setBool:YES forKey:kFirstRunKey];
-            [defaults synchronize];
-
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC),
-                           dispatch_get_main_queue(), ^{
-                UIAlertController *welcome = [UIAlertController
-                    alertControllerWithTitle:@"YTKActivator"
-                    message:@"YTKPlus has been activated successfully.\n\nMade by itzzace"
-                    preferredStyle:UIAlertControllerStyleAlert];
-                [welcome addAction:[UIAlertAction actionWithTitle:@"OK"
-                                    style:UIAlertActionStyleDefault handler:nil]];
-
-                UIWindowScene *ws = nil;
-                for (UIScene *s in [UIApplication sharedApplication].connectedScenes) {
-                    if ([s isKindOfClass:[UIWindowScene class]]) { ws = (UIWindowScene *)s; break; }
-                }
-                UIViewController *topVC = nil;
-                for (UIWindow *w in ws.windows) {
-                    if (w.isKeyWindow) { topVC = w.rootViewController; break; }
-                }
-                while (topVC.presentedViewController) topVC = topVC.presentedViewController;
-                if (topVC) [topVC presentViewController:welcome animated:YES completion:nil];
-
-                LOG(@"First-run welcome popup shown");
-            });
-        }
-    });
-
-    LOG(@"=== Phase 2 complete ===");
+        });
     } @catch (NSException *e) {
-        LOG(@"Phase 2 exception: %@", e);
+        LOG(@"dyld_callback exception: %@", e);
     }
 }
+
 // ============================================================
-#pragma mark — Constructor (Phase 1)
+#pragma mark — Constructor
 // ============================================================
 __attribute__((constructor))
-static void init() {
+static void init(void) {
     @try {
-        LOG(@"=== Phase 1: Initializing (DYLD_INTERPOSE active) ===");
+        LOG(@"=== v16 substrate-free init ===");
 
-        // SecItem hooks are installed via DYLD_INTERPOSE at load time (no code patching).
-        // Just resolve the real function pointers so we can call them.
+        // Resolve real SecItem pointers (interposers are auto-installed by dyld)
         resolveRealSecItem();
         LOG(@"SecItem real ptrs: copy=%p del=%p add=%p",
             real_SecItemCopyMatching, real_SecItemDelete, real_SecItemAdd);
 
-        // Hook UIViewController presentViewController — ObjC swizzle (safe, no code mod)
+        // Swizzle UIViewController presentViewController:animated:completion:
         Class vcClass = [UIViewController class];
         if (vcClass) {
-            MSHookMessageEx(vcClass,
-                            @selector(presentViewController:animated:completion:),
-                            (IMP)hook_presentVC,
-                            (IMP *)&orig_presentVC);
-            LOG(@"Hooked UIViewController presentViewController:animated:completion:");
+            swizzleInstanceMethod(vcClass,
+                                  @selector(presentViewController:animated:completion:),
+                                  (IMP)hook_presentVC, (IMP *)&orig_presentVC);
+            LOG(@"UIViewController.presentViewController swizzled");
         }
 
-        // Register dyld callback for Phase 2
+        // Register dyld callback for YTKPlus detection
         _dyld_register_func_for_add_image(dyld_callback);
-        LOG(@"Registered dyld callback");
+        LOG(@"dyld callback registered");
 
-        LOG(@"=== Phase 1 complete ===");
+        LOG(@"=== v16 init complete ===");
     } @catch (NSException *e) {
-        LOG(@"Phase 1 EXCEPTION: %@ — tweak disabled", e);
+        LOG(@"init EXCEPTION: %@", e);
     }
 }
