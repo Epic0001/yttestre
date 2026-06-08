@@ -80,16 +80,16 @@ static OSStatus (*real_SecItemAdd)(CFDictionaryRef, CFTypeRef *) = NULL;
 static void resolveRealSecItem(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        real_SecItemCopyMatching = dlsym(RTLD_NEXT, "SecItemCopyMatching");
-        real_SecItemDelete       = dlsym(RTLD_NEXT, "SecItemDelete");
-        real_SecItemAdd          = dlsym(RTLD_NEXT, "SecItemAdd");
+        real_SecItemCopyMatching = (OSStatus (*)(CFDictionaryRef, CFTypeRef *))dlsym(RTLD_NEXT, "SecItemCopyMatching");
+        real_SecItemDelete       = (OSStatus (*)(CFDictionaryRef))dlsym(RTLD_NEXT, "SecItemDelete");
+        real_SecItemAdd          = (OSStatus (*)(CFDictionaryRef, CFTypeRef *))dlsym(RTLD_NEXT, "SecItemAdd");
         // Fall back to looking in Security.framework directly if RTLD_NEXT fails
         if (!real_SecItemCopyMatching) {
             void *sec = dlopen("/System/Library/Frameworks/Security.framework/Security", RTLD_NOW | RTLD_NOLOAD);
             if (sec) {
-                real_SecItemCopyMatching = dlsym(sec, "SecItemCopyMatching");
-                real_SecItemDelete       = dlsym(sec, "SecItemDelete");
-                real_SecItemAdd          = dlsym(sec, "SecItemAdd");
+                real_SecItemCopyMatching = (OSStatus (*)(CFDictionaryRef, CFTypeRef *))dlsym(sec, "SecItemCopyMatching");
+                real_SecItemDelete       = (OSStatus (*)(CFDictionaryRef))dlsym(sec, "SecItemDelete");
+                real_SecItemAdd          = (OSStatus (*)(CFDictionaryRef, CFTypeRef *))dlsym(sec, "SecItemAdd");
             }
         }
     });
