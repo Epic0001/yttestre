@@ -232,17 +232,6 @@ static void hook_presentVC(UIViewController *self, SEL _cmd,
     orig_presentVC(self, _cmd, vc, animated, completion);
 }
 // ============================================================
-#pragma mark — Phase 2: FUN_00046d48 hook (seal validator → return 0)
-// ============================================================
-// FUN_00046d48 signature: byte FUN_00046d48(long,long,long,long,long,ID)
-// Returning 0 prevents the server verification call in checkAuthenticationStatusAndProceed.
-// Returning 1 would CAUSE the server call → "Invalid key" popup.
-static uint8_t (*orig_FUN_00046d48)(long, long, long, long, long, void *);
-static uint8_t hook_FUN_00046d48(long p1, long p2, long p3, long p4, long p5, void *p6) {
-    LOG(@"FUN_00046d48 called → returning 0 (prevents server verify call)");
-    return 0;
-}
-// ============================================================
 #pragma mark — Phase 3: Settings page hooks
 // ============================================================
 static void (*orig_settingsVerifyYkChecker)(id, SEL, id);
@@ -282,20 +271,17 @@ static void dyld_callback(const struct mach_header *mh, intptr_t slide) {
         LOG(@"=== Phase 2: YTKPlus found at %s (slide=0x%lx) ===", info.dli_fname, (long)slide);
 
         ytkPlusFound = YES;
-        uintptr_t base = (uintptr_t)mh;
 
-        // Validate mach-o magic before hooking to prevent crashes from wrong binary
-        uint32_t magic = *(uint32_t *)mh;
-        if (magic != MH_MAGIC_64 && magic != MH_MAGIC) {
-            LOG(@"WARNING: Invalid mach-o magic 0x%x — skipping hook", magic);
-            return;
-        }
-
-        void *fn_46d48 = (void *)(base + 0x46d48);
-        if (fn_46d48) {
-            MSHookFunction(fn_46d48, (void *)hook_FUN_00046d48, (void **)&orig_FUN_00046d48);
-            LOG(@"Hooked FUN_00046d48 at %p → returns 0", fn_46d48);
-        }
+        // NOTE: We DO NOT MSHookFunction inside YTKPlus.dylib anymore.
+        // iOS 26+ code signing monitor kills the process when any loaded binary's
+        // code pages are modified — even third-party dylibs.
+        //
+        // Instead, we rely on:
+        //   1. SecItem DYLD_INTERPOSE → fakes keychain reads so bVar1 = true
+        //      (auth_integrity_seal returns nil → HMAC skipped → premium hooks install)
+        //   2. presentVC swizzle → suppresses "Invalid key" alert from failed server verify
+        //   3. settingsVerifyYkChecker swizzle → bypasses settings page check
+        LOG(@"YTKPlus detected — relying on SecItem interpose for bypass (no code patching)");
 
     // Phase 3: Delayed hooks for runtime classes
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
