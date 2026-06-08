@@ -59,18 +59,54 @@ static NSString *const kEnabledStatus    = @"Enabledytk_status";
 static NSString *const kActivationLogged = @"activation_logged";
 static NSString *const kStatsSent        = @"stats_sent_before";
 // ============================================================
+// DYLD_INTERPOSE — replaces system functions via dyld metadata,
+// no code pages modified, passes iOS 26+ code signing monitor
+// ============================================================
+#define DYLD_INTERPOSE(_replacement, _replacee) \
+    __attribute__((used)) static struct { \
+        const void *replacement; \
+        const void *replacee; \
+    } _interpose_##_replacee \
+    __attribute__((section("__DATA,__interpose"))) = { \
+        (const void *)(unsigned long)&_replacement, \
+        (const void *)(unsigned long)&_replacee \
+    };
+
+// Look up real implementations on first call (bypasses our own interpose)
+static OSStatus (*real_SecItemCopyMatching)(CFDictionaryRef, CFTypeRef *) = NULL;
+static OSStatus (*real_SecItemDelete)(CFDictionaryRef) = NULL;
+static OSStatus (*real_SecItemAdd)(CFDictionaryRef, CFTypeRef *) = NULL;
+
+static void resolveRealSecItem(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        real_SecItemCopyMatching = dlsym(RTLD_NEXT, "SecItemCopyMatching");
+        real_SecItemDelete       = dlsym(RTLD_NEXT, "SecItemDelete");
+        real_SecItemAdd          = dlsym(RTLD_NEXT, "SecItemAdd");
+        // Fall back to looking in Security.framework directly if RTLD_NEXT fails
+        if (!real_SecItemCopyMatching) {
+            void *sec = dlopen("/System/Library/Frameworks/Security.framework/Security", RTLD_NOW | RTLD_NOLOAD);
+            if (sec) {
+                real_SecItemCopyMatching = dlsym(sec, "SecItemCopyMatching");
+                real_SecItemDelete       = dlsym(sec, "SecItemDelete");
+                real_SecItemAdd          = dlsym(sec, "SecItemAdd");
+            }
+        }
+    });
+}
+
+// ============================================================
 #pragma mark — Phase 1: SecItemCopyMatching hook
 // ============================================================
-static OSStatus (*orig_SecItemCopyMatching)(CFDictionaryRef query, CFTypeRef *result);
 static OSStatus hook_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *result) {
     @autoreleasepool {
-        if (!ytkPlusFound) return orig_SecItemCopyMatching(query, result);
+        if (!ytkPlusFound) return real_SecItemCopyMatching(query, result);
 
         NSDictionary *dict = (__bridge NSDictionary *)query;
         NSString *service = dict[(__bridge id)kSecAttrService];
 
         if (![service isEqualToString:kService]) {
-            return orig_SecItemCopyMatching(query, result);
+            return real_SecItemCopyMatching(query, result);
         }
 
         NSString *account = dict[(__bridge id)kSecAttrAccount];
@@ -127,10 +163,9 @@ static OSStatus hook_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *resul
 // ============================================================
 #pragma mark — Phase 1: SecItemDelete hook
 // ============================================================
-static OSStatus (*orig_SecItemDelete)(CFDictionaryRef query);
 static OSStatus hook_SecItemDelete(CFDictionaryRef query) {
     @autoreleasepool {
-        if (!ytkPlusFound) return orig_SecItemDelete(query);
+        if (!ytkPlusFound) return real_SecItemDelete(query);
 
         NSDictionary *dict = (__bridge NSDictionary *)query;
         NSString *service = dict[(__bridge id)kSecAttrService];
@@ -140,16 +175,15 @@ static OSStatus hook_SecItemDelete(CFDictionaryRef query) {
             LOG(@"SecItemDelete BLOCKED: %@", account ?: @"(all)");
             return errSecSuccess; // pretend success
         }
-        return orig_SecItemDelete(query);
+        return real_SecItemDelete(query);
     }
 }
 // ============================================================
 #pragma mark — Phase 1: SecItemAdd hook
 // ============================================================
-static OSStatus (*orig_SecItemAdd)(CFDictionaryRef attributes, CFTypeRef *result);
 static OSStatus hook_SecItemAdd(CFDictionaryRef attributes, CFTypeRef *result) {
     @autoreleasepool {
-        if (!ytkPlusFound) return orig_SecItemAdd(attributes, result);
+        if (!ytkPlusFound) return real_SecItemAdd(attributes, result);
 
         NSDictionary *dict = (__bridge NSDictionary *)attributes;
         NSString *service = dict[(__bridge id)kSecAttrService];
@@ -160,9 +194,14 @@ static OSStatus hook_SecItemAdd(CFDictionaryRef attributes, CFTypeRef *result) {
             if (result) *result = NULL;
             return errSecSuccess; // pretend success
         }
-        return orig_SecItemAdd(attributes, result);
+        return real_SecItemAdd(attributes, result);
     }
 }
+
+// Register the interpose entries — dyld will swap pointers at load time
+DYLD_INTERPOSE(hook_SecItemCopyMatching, SecItemCopyMatching)
+DYLD_INTERPOSE(hook_SecItemDelete, SecItemDelete)
+DYLD_INTERPOSE(hook_SecItemAdd, SecItemAdd)
 // ============================================================
 #pragma mark — Phase 1: UIViewController presentViewController hook
 // ============================================================
@@ -349,28 +388,15 @@ static void dyld_callback(const struct mach_header *mh, intptr_t slide) {
 __attribute__((constructor))
 static void init() {
     @try {
-        LOG(@"=== Phase 1: Installing C-level hooks ===");
+        LOG(@"=== Phase 1: Initializing (DYLD_INTERPOSE active) ===");
 
-        // Hook SecItemCopyMatching — intercepts ALL keychain reads for ytkplus
-        MSHookFunction((void *)SecItemCopyMatching,
-                       (void *)hook_SecItemCopyMatching,
-                       (void **)&orig_SecItemCopyMatching);
-        LOG(@"Hooked SecItemCopyMatching");
+        // SecItem hooks are installed via DYLD_INTERPOSE at load time (no code patching).
+        // Just resolve the real function pointers so we can call them.
+        resolveRealSecItem();
+        LOG(@"SecItem real ptrs: copy=%p del=%p add=%p",
+            real_SecItemCopyMatching, real_SecItemDelete, real_SecItemAdd);
 
-        // Hook SecItemDelete — blocks all keychain deletes for ytkplus
-        MSHookFunction((void *)SecItemDelete,
-                       (void *)hook_SecItemDelete,
-                       (void **)&orig_SecItemDelete);
-        LOG(@"Hooked SecItemDelete");
-
-        // Hook SecItemAdd — blocks all keychain writes for ytkplus
-        MSHookFunction((void *)SecItemAdd,
-                       (void *)hook_SecItemAdd,
-                       (void **)&orig_SecItemAdd);
-        LOG(@"Hooked SecItemAdd");
-
-        // Hook UIViewController presentViewController — suppress license alerts
-        // Delay this slightly in IPA context to ensure UIKit is ready
+        // Hook UIViewController presentViewController — ObjC swizzle (safe, no code mod)
         Class vcClass = [UIViewController class];
         if (vcClass) {
             MSHookMessageEx(vcClass,

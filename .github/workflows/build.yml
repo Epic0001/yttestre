@@ -36,27 +36,11 @@ jobs:
           echo "=== Original load commands ==="
           otool -L "$DYLIB"
 
-          # Change substrate to @loader_path/libsubstrate.dylib
-          # This points to ChocoMulti's bundled substrate (in the same folder as our dylib)
-          # which is what other ChocoMulti dylibs use.
-          install_name_tool -change \
-            @rpath/CydiaSubstrate.framework/CydiaSubstrate \
-            @loader_path/libsubstrate.dylib \
-            "$DYLIB" 2>/dev/null || true
-
-          install_name_tool -change \
-            /var/jb/usr/lib/libsubstrate.dylib \
-            @loader_path/libsubstrate.dylib \
-            "$DYLIB" 2>/dev/null || true
-
-          install_name_tool -change \
-            /usr/lib/libsubstrate.dylib \
-            @loader_path/libsubstrate.dylib \
-            "$DYLIB" 2>/dev/null || true
-
-          # Add fallback rpaths too in case @loader_path/libsubstrate.dylib doesn't exist
+          # macOS Theos build already uses @rpath/CydiaSubstrate.framework/CydiaSubstrate.
+          # Just add rpath search paths to ensure it's found in both bundle locations.
           install_name_tool -add_rpath @executable_path/Frameworks "$DYLIB" 2>/dev/null || true
           install_name_tool -add_rpath @loader_path "$DYLIB" 2>/dev/null || true
+          install_name_tool -add_rpath @loader_path/.. "$DYLIB" 2>/dev/null || true
 
           # Re-sign with ldid (Theos provides this)
           ldid -S "$DYLIB" 2>/dev/null || true
