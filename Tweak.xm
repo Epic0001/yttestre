@@ -70,24 +70,38 @@ static NSMutableArray *seenServiceAccountPairs = nil;
 // ============================================================
 #pragma mark — Real SecItem function pointers
 // ============================================================
+// IMPORTANT: These are resolved ONCE via dlsym and NEVER overwritten.
+// fishhook uses separate dummy pointers so it can't corrupt these.
 static OSStatus (*real_SecItemCopyMatching)(CFDictionaryRef, CFTypeRef *) = NULL;
 static OSStatus (*real_SecItemDelete)(CFDictionaryRef) = NULL;
 static OSStatus (*real_SecItemAdd)(CFDictionaryRef, CFTypeRef *) = NULL;
 
+// Dummy pointers for fishhook's "original" output — we throw these away.
+// Without this, fishhook overwrites real_* with the INTERPOSED address → infinite recursion.
+static OSStatus (*_fishhook_orig_copy)(CFDictionaryRef, CFTypeRef *) = NULL;
+static OSStatus (*_fishhook_orig_delete)(CFDictionaryRef) = NULL;
+static OSStatus (*_fishhook_orig_add)(CFDictionaryRef, CFTypeRef *) = NULL;
+
 static void resolveRealSecItem(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        real_SecItemCopyMatching = (OSStatus (*)(CFDictionaryRef, CFTypeRef *))dlsym(RTLD_NEXT, "SecItemCopyMatching");
-        real_SecItemDelete       = (OSStatus (*)(CFDictionaryRef))dlsym(RTLD_NEXT, "SecItemDelete");
-        real_SecItemAdd          = (OSStatus (*)(CFDictionaryRef, CFTypeRef *))dlsym(RTLD_NEXT, "SecItemAdd");
-        if (!real_SecItemCopyMatching) {
-            void *sec = dlopen("/System/Library/Frameworks/Security.framework/Security", RTLD_NOW | RTLD_NOLOAD);
-            if (sec) {
-                real_SecItemCopyMatching = (OSStatus (*)(CFDictionaryRef, CFTypeRef *))dlsym(sec, "SecItemCopyMatching");
-                real_SecItemDelete       = (OSStatus (*)(CFDictionaryRef))dlsym(sec, "SecItemDelete");
-                real_SecItemAdd          = (OSStatus (*)(CFDictionaryRef, CFTypeRef *))dlsym(sec, "SecItemAdd");
-            }
+        // Always resolve from the Security framework directly — immune to interpose
+        void *sec = dlopen("/System/Library/Frameworks/Security.framework/Security", RTLD_NOW | RTLD_NOLOAD);
+        if (!sec) sec = dlopen("/System/Library/Frameworks/Security.framework/Security", RTLD_NOW);
+        if (sec) {
+            real_SecItemCopyMatching = (OSStatus (*)(CFDictionaryRef, CFTypeRef *))dlsym(sec, "SecItemCopyMatching");
+            real_SecItemDelete       = (OSStatus (*)(CFDictionaryRef))dlsym(sec, "SecItemDelete");
+            real_SecItemAdd          = (OSStatus (*)(CFDictionaryRef, CFTypeRef *))dlsym(sec, "SecItemAdd");
         }
+        // Fallback to RTLD_NEXT (may return interposed version, but better than NULL)
+        if (!real_SecItemCopyMatching)
+            real_SecItemCopyMatching = (OSStatus (*)(CFDictionaryRef, CFTypeRef *))dlsym(RTLD_NEXT, "SecItemCopyMatching");
+        if (!real_SecItemDelete)
+            real_SecItemDelete = (OSStatus (*)(CFDictionaryRef))dlsym(RTLD_NEXT, "SecItemDelete");
+        if (!real_SecItemAdd)
+            real_SecItemAdd = (OSStatus (*)(CFDictionaryRef, CFTypeRef *))dlsym(RTLD_NEXT, "SecItemAdd");
+
+        LOG(@"Real SecItem resolved: copy=%p del=%p add=%p", real_SecItemCopyMatching, real_SecItemDelete, real_SecItemAdd);
     });
 }
 
@@ -319,19 +333,20 @@ static void dyld_callback(const struct mach_header *mh, intptr_t slide) {
         NSString *path = [NSString stringWithUTF8String:info.dli_fname];
         if (![path containsString:@"YTKPlus"]) return;
 
-        LOG(@"YTKPlus.dylib loaded — fishhook will rebind its SecItem imports");
+        LOG(@"YTKPlus.dylib detected at runtime (base=%p slide=0x%lx)", mh, (long)slide);
         ytkPlusFound = YES;
 
-        // CRITICAL: Use fishhook to rebind YTKPlus.dylib's SecItem imports.
-        // DYLD_INTERPOSE doesn't work for dlopen'd dylibs on iOS 26.
-        // Fishhook rewrites the __DATA,__la_symbol_ptr entries (no code modification → CSM-safe).
+        // CRITICAL: DYLD_INTERPOSE does NOT reliably intercept dlopen'd dylibs.
+        // Use fishhook to rewrite YTKPlus's __DATA,__la_symbol_ptr (GOT entries).
+        // This modifies DATA pages only — no code patching — CSM-safe on iOS 26.
+        // Use dummy pointers so fishhook can't overwrite our dlsym-resolved real_* pointers.
         struct rebinding rebs[3] = {
-            { "SecItemCopyMatching", (void *)hook_SecItemCopyMatching, (void **)&real_SecItemCopyMatching },
-            { "SecItemDelete",        (void *)hook_SecItemDelete,        (void **)&real_SecItemDelete },
-            { "SecItemAdd",           (void *)hook_SecItemAdd,           (void **)&real_SecItemAdd },
+            { "SecItemCopyMatching", (void *)hook_SecItemCopyMatching, (void **)&_fishhook_orig_copy },
+            { "SecItemDelete",        (void *)hook_SecItemDelete,        (void **)&_fishhook_orig_delete },
+            { "SecItemAdd",           (void *)hook_SecItemAdd,           (void **)&_fishhook_orig_add },
         };
         fishhook_result = rebind_symbols_image((void *)mh, slide, rebs, 3);
-        LOG(@"fishhook rebind_symbols_image returned %d", fishhook_result);
+        LOG(@"fishhook rebind_symbols_image result: %d (0=success)", fishhook_result);
 
         // Phase 3: Wait for YTKPlus constructor to create runtime classes, then swizzle
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
@@ -379,20 +394,24 @@ static void dyld_callback(const struct mach_header *mh, intptr_t slide) {
                 NSString *pairsList = seenServiceAccountPairs.count > 0
                     ? [seenServiceAccountPairs componentsJoinedByString:@"\n  "]
                     : @"(none)";
+                NSString *accountsList = seenAccounts.count > 0
+                    ? [seenAccounts componentsJoinedByString:@", "]
+                    : @"(none)";
                 NSString *msg = [NSString stringWithFormat:
-                    @"v20 Diagnostics\n\n"
-                    @"fishhook result: %d\n"
+                    @"v21 Diagnostics\n\n"
+                    @"fishhook result: %d (0=OK)\n"
                     @"SecItemCopyMatching total: %d\n"
-                    @"  for YTK service: %d\n"
+                    @"  for YTK service: %d ← MUST BE >0\n"
                     @"SecItemDelete: %d, SecItemAdd: %d\n\n"
-                    @"=== ALL services queried ===\n  %@\n\n"
-                    @"=== Full query log ===\n  %@\n\n"
+                    @"YTK accounts seen:\n  %@\n\n"
+                    @"If 'for YTK service' is 0, hooks aren't\n"
+                    @"catching YTKPlus calls → bVar1=false\n"
+                    @"→ no premium features.\n\n"
                     @"Made by itzzace",
                     fishhook_result,
                     hook_copy_count, hook_copy_ytk_count,
                     hook_delete_count, hook_add_count,
-                    servicesList,
-                    pairsList];
+                    accountsList];
 
                 UIAlertController *welcome = [UIAlertController
                     alertControllerWithTitle:@"YTKActivator Debug"
