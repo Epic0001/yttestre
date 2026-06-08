@@ -43,6 +43,13 @@ static NSString *const kEnabledStatus    = @"Enabledytk_status";
 static NSString *const kActivationLogged = @"activation_logged";
 static NSString *const kStatsSent        = @"stats_sent_before";
 
+// Diagnostic counters
+static _Atomic int hook_copy_count = 0;
+static _Atomic int hook_copy_ytk_count = 0;
+static _Atomic int hook_delete_count = 0;
+static _Atomic int hook_add_count = 0;
+static NSMutableArray *seenAccounts = nil;
+
 // ============================================================
 #pragma mark — DYLD_INTERPOSE macro
 // ============================================================
@@ -87,6 +94,7 @@ static void resolveRealSecItem(void) {
 static OSStatus hook_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *result) {
     @autoreleasepool {
         if (!real_SecItemCopyMatching) resolveRealSecItem();
+        hook_copy_count++;
         if (!ytkPlusFound) return real_SecItemCopyMatching(query, result);
 
         NSDictionary *dict = (__bridge NSDictionary *)query;
@@ -95,7 +103,13 @@ static OSStatus hook_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *resul
             return real_SecItemCopyMatching(query, result);
         }
 
+        hook_copy_ytk_count++;
         NSString *account = dict[(__bridge id)kSecAttrAccount];
+        if (account && seenAccounts && ![seenAccounts containsObject:account] && seenAccounts.count < 30) {
+            @synchronized(seenAccounts) {
+                if (![seenAccounts containsObject:account]) [seenAccounts addObject:account];
+            }
+        }
 
         // Keys that must return nil to skip HMAC checks
         if ([account isEqualToString:kAuthSeal] || [account isEqualToString:kAuthLastSeal]) {
@@ -128,6 +142,7 @@ static OSStatus hook_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *resul
 static OSStatus hook_SecItemDelete(CFDictionaryRef query) {
     @autoreleasepool {
         if (!real_SecItemDelete) resolveRealSecItem();
+        hook_delete_count++;
         if (!ytkPlusFound) return real_SecItemDelete(query);
 
         NSDictionary *dict = (__bridge NSDictionary *)query;
@@ -142,6 +157,7 @@ static OSStatus hook_SecItemDelete(CFDictionaryRef query) {
 static OSStatus hook_SecItemAdd(CFDictionaryRef attributes, CFTypeRef *result) {
     @autoreleasepool {
         if (!real_SecItemAdd) resolveRealSecItem();
+        hook_add_count++;
         if (!ytkPlusFound) return real_SecItemAdd(attributes, result);
 
         NSDictionary *dict = (__bridge NSDictionary *)attributes;
@@ -324,39 +340,54 @@ static void dyld_callback(const struct mach_header *mh, intptr_t slide) {
                 LOG(@"RootOptionsController cell forcing installed");
             }
 
-            // First-run welcome popup
-            NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-            if (![defaults boolForKey:kFirstRunKey]) {
-                [defaults setBool:YES forKey:kFirstRunKey];
-                [defaults synchronize];
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC),
-                               dispatch_get_main_queue(), ^{
-                    UIAlertController *welcome = [UIAlertController
-                        alertControllerWithTitle:@"YTKActivator"
-                        message:@"YTKPlus has been activated successfully.\n\nMade by itzzace"
-                        preferredStyle:UIAlertControllerStyleAlert];
-                    [welcome addAction:[UIAlertAction actionWithTitle:@"OK"
-                                        style:UIAlertActionStyleDefault handler:nil]];
-                    UIWindowScene *ws = nil;
-                    for (UIScene *s in [UIApplication sharedApplication].connectedScenes) {
-                        if ([s isKindOfClass:[UIWindowScene class]]) { ws = (UIWindowScene *)s; break; }
+            // Diagnostic popup (always shows for now to debug feature issues)
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 4 * NSEC_PER_SEC),
+                           dispatch_get_main_queue(), ^{
+                NSString *accountList = seenAccounts.count > 0
+                    ? [seenAccounts componentsJoinedByString:@"\n  "]
+                    : @"(none — interpose not working!)";
+                NSString *msg = [NSString stringWithFormat:
+                    @"v18 Diagnostics\n\n"
+                    @"SecItemCopyMatching total: %d\n"
+                    @"  → for YTK service: %d\n"
+                    @"SecItemDelete total: %d\n"
+                    @"SecItemAdd total: %d\n\n"
+                    @"YTK accounts queried:\n  %@\n\n"
+                    @"Made by itzzace",
+                    hook_copy_count, hook_copy_ytk_count,
+                    hook_delete_count, hook_add_count,
+                    accountList];
+
+                UIAlertController *welcome = [UIAlertController
+                    alertControllerWithTitle:@"YTKActivator Debug"
+                    message:msg
+                    preferredStyle:UIAlertControllerStyleAlert];
+                [welcome addAction:[UIAlertAction actionWithTitle:@"Copy"
+                                    style:UIAlertActionStyleDefault
+                                    handler:^(UIAlertAction *a) {
+                    [UIPasteboard generalPasteboard].string = msg;
+                }]];
+                [welcome addAction:[UIAlertAction actionWithTitle:@"OK"
+                                    style:UIAlertActionStyleCancel handler:nil]];
+
+                UIWindowScene *ws = nil;
+                for (UIScene *s in [UIApplication sharedApplication].connectedScenes) {
+                    if ([s isKindOfClass:[UIWindowScene class]]) { ws = (UIWindowScene *)s; break; }
+                }
+                UIViewController *topVC = nil;
+                for (UIWindow *w in ws.windows) {
+                    if (w.isKeyWindow) { topVC = w.rootViewController; break; }
+                }
+                while (topVC.presentedViewController) topVC = topVC.presentedViewController;
+                if (topVC) {
+                    if (orig_presentVC) {
+                        orig_presentVC(topVC, @selector(presentViewController:animated:completion:),
+                                       welcome, YES, nil);
+                    } else {
+                        [topVC presentViewController:welcome animated:YES completion:nil];
                     }
-                    UIViewController *topVC = nil;
-                    for (UIWindow *w in ws.windows) {
-                        if (w.isKeyWindow) { topVC = w.rootViewController; break; }
-                    }
-                    while (topVC.presentedViewController) topVC = topVC.presentedViewController;
-                    if (topVC) {
-                        // Bypass our own presentVC hook by calling original directly
-                        if (orig_presentVC) {
-                            orig_presentVC(topVC, @selector(presentViewController:animated:completion:),
-                                           welcome, YES, nil);
-                        } else {
-                            [topVC presentViewController:welcome animated:YES completion:nil];
-                        }
-                    }
-                });
-            }
+                }
+            });
         });
     } @catch (NSException *e) {
         LOG(@"dyld_callback exception: %@", e);
@@ -369,7 +400,8 @@ static void dyld_callback(const struct mach_header *mh, intptr_t slide) {
 __attribute__((constructor))
 static void init(void) {
     @try {
-        LOG(@"=== v16 substrate-free init ===");
+        LOG(@"=== v18 substrate-free init + diagnostics ===");
+        seenAccounts = [NSMutableArray new];
 
         // Resolve real SecItem pointers (interposers are auto-installed by dyld)
         resolveRealSecItem();
