@@ -18,6 +18,7 @@
 #import <mach-o/dyld.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
+#import "fishhook.h"
 
 // ============================================================
 #pragma mark — Logging
@@ -300,8 +301,19 @@ static void dyld_callback(const struct mach_header *mh, intptr_t slide) {
         NSString *path = [NSString stringWithUTF8String:info.dli_fname];
         if (![path containsString:@"YTKPlus"]) return;
 
-        LOG(@"YTKPlus.dylib loaded — SecItem interpose will fake activation");
+        LOG(@"YTKPlus.dylib loaded — fishhook will rebind its SecItem imports");
         ytkPlusFound = YES;
+
+        // CRITICAL: Use fishhook to rebind YTKPlus.dylib's SecItem imports.
+        // DYLD_INTERPOSE doesn't work for dlopen'd dylibs on iOS 26.
+        // Fishhook rewrites the __DATA,__la_symbol_ptr entries (no code modification → CSM-safe).
+        struct rebinding rebs[3] = {
+            { "SecItemCopyMatching", (void *)hook_SecItemCopyMatching, (void **)&real_SecItemCopyMatching },
+            { "SecItemDelete",        (void *)hook_SecItemDelete,        (void **)&real_SecItemDelete },
+            { "SecItemAdd",           (void *)hook_SecItemAdd,           (void **)&real_SecItemAdd },
+        };
+        int rb_result = rebind_symbols_image((void *)mh, slide, rebs, 3);
+        LOG(@"fishhook rebind_symbols_image returned %d", rb_result);
 
         // Phase 3: Wait for YTKPlus constructor to create runtime classes, then swizzle
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),

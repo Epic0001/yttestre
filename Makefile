@@ -10,8 +10,8 @@ include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME = YTKActivator
 
-YTKActivator_FILES = Tweak.xm
-YTKActivator_CFLAGS = -fobjc-arc
+YTKActivator_FILES = Tweak.xm fishhook.c
+YTKActivator_CFLAGS = -fobjc-arc -DFISHHOOK_EXPORT=1
 YTKActivator_FRAMEWORKS = UIKit Foundation Security
 
 include $(THEOS_MAKE_PATH)/tweak.mk
