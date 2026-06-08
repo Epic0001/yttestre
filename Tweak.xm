@@ -388,12 +388,6 @@ static void dyld_callback(const struct mach_header *mh, intptr_t slide) {
             // Diagnostic popup (always shows for now to debug feature issues)
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 4 * NSEC_PER_SEC),
                            dispatch_get_main_queue(), ^{
-                NSString *servicesList = seenServices.count > 0
-                    ? [seenServices componentsJoinedByString:@"\n  "]
-                    : @"(none)";
-                NSString *pairsList = seenServiceAccountPairs.count > 0
-                    ? [seenServiceAccountPairs componentsJoinedByString:@"\n  "]
-                    : @"(none)";
                 NSString *accountsList = seenAccounts.count > 0
                     ? [seenAccounts componentsJoinedByString:@", "]
                     : @"(none)";
