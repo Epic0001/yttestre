@@ -51,6 +51,8 @@ static _Atomic int hook_delete_count = 0;
 static _Atomic int hook_add_count = 0;
 static int fishhook_result = -999;
 static NSMutableArray *seenAccounts = nil;
+static NSMutableArray *seenServices = nil;
+static NSMutableArray *seenServiceAccountPairs = nil;
 
 // ============================================================
 #pragma mark — DYLD_INTERPOSE macro
@@ -101,12 +103,27 @@ static OSStatus hook_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *resul
 
         NSDictionary *dict = (__bridge NSDictionary *)query;
         NSString *service = dict[(__bridge id)kSecAttrService];
+        NSString *account = dict[(__bridge id)kSecAttrAccount];
+
+        // Log EVERY service+account pair YTKPlus queries (regardless of match)
+        NSString *pair = [NSString stringWithFormat:@"%@ / %@",
+                          service ?: @"(no service)", account ?: @"(no account)"];
+        if (seenServiceAccountPairs && ![seenServiceAccountPairs containsObject:pair] && seenServiceAccountPairs.count < 50) {
+            @synchronized(seenServiceAccountPairs) {
+                if (![seenServiceAccountPairs containsObject:pair]) [seenServiceAccountPairs addObject:pair];
+            }
+        }
+        if (service && seenServices && ![seenServices containsObject:service] && seenServices.count < 30) {
+            @synchronized(seenServices) {
+                if (![seenServices containsObject:service]) [seenServices addObject:service];
+            }
+        }
+
         if (![service isEqualToString:kService]) {
             return real_SecItemCopyMatching(query, result);
         }
 
         hook_copy_ytk_count++;
-        NSString *account = dict[(__bridge id)kSecAttrAccount];
         if (account && seenAccounts && ![seenAccounts containsObject:account] && seenAccounts.count < 30) {
             @synchronized(seenAccounts) {
                 if (![seenAccounts containsObject:account]) [seenAccounts addObject:account];
@@ -356,23 +373,26 @@ static void dyld_callback(const struct mach_header *mh, intptr_t slide) {
             // Diagnostic popup (always shows for now to debug feature issues)
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 4 * NSEC_PER_SEC),
                            dispatch_get_main_queue(), ^{
-                NSString *accountList = seenAccounts.count > 0
-                    ? [seenAccounts componentsJoinedByString:@"\n  "]
-                    : @"(none — interpose not working!)";
+                NSString *servicesList = seenServices.count > 0
+                    ? [seenServices componentsJoinedByString:@"\n  "]
+                    : @"(none)";
+                NSString *pairsList = seenServiceAccountPairs.count > 0
+                    ? [seenServiceAccountPairs componentsJoinedByString:@"\n  "]
+                    : @"(none)";
                 NSString *msg = [NSString stringWithFormat:
-                    @"v19 Diagnostics\n\n"
-                    @"fishhook rebind result: %d\n"
-                    @"  (0=success, -1=fail, -999=never ran)\n\n"
+                    @"v20 Diagnostics\n\n"
+                    @"fishhook result: %d\n"
                     @"SecItemCopyMatching total: %d\n"
-                    @"  → for YTK service: %d\n"
-                    @"SecItemDelete total: %d\n"
-                    @"SecItemAdd total: %d\n\n"
-                    @"YTK accounts queried:\n  %@\n\n"
+                    @"  for YTK service: %d\n"
+                    @"SecItemDelete: %d, SecItemAdd: %d\n\n"
+                    @"=== ALL services queried ===\n  %@\n\n"
+                    @"=== Full query log ===\n  %@\n\n"
                     @"Made by itzzace",
                     fishhook_result,
                     hook_copy_count, hook_copy_ytk_count,
                     hook_delete_count, hook_add_count,
-                    accountList];
+                    servicesList,
+                    pairsList];
 
                 UIAlertController *welcome = [UIAlertController
                     alertControllerWithTitle:@"YTKActivator Debug"
@@ -416,8 +436,10 @@ static void dyld_callback(const struct mach_header *mh, intptr_t slide) {
 __attribute__((constructor))
 static void init(void) {
     @try {
-        LOG(@"=== v18 substrate-free init + diagnostics ===");
+        LOG(@"=== v20 substrate-free init + service diagnostics ===");
         seenAccounts = [NSMutableArray new];
+        seenServices = [NSMutableArray new];
+        seenServiceAccountPairs = [NSMutableArray new];
 
         // Resolve real SecItem pointers (interposers are auto-installed by dyld)
         resolveRealSecItem();
