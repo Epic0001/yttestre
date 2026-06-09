@@ -409,18 +409,24 @@ static void init(void) {
     @try {
         resolveRealSecItem();
 
-        // Primary: write real keychain values before YTKPlus reads them
-        preseedKeychain();
-
-        // Alert suppression
-        swizzleInstanceMethod([UIViewController class],
-                              @selector(presentViewController:animated:completion:),
-                              (IMP)hook_presentVC, (IMP *)&orig_presentVC);
-
-        // Secondary: DYLD_INTERPOSE + fishhook for post-init protection
+        // Register dyld callback immediately (catches YTKPlus image load)
         _dyld_register_func_for_add_image(dyld_callback);
 
-        LOG(@"YTKActivator %@ loaded", kVersion);
+        // Delay everything else by 5 seconds to let YTK finish initializing
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC),
+                       dispatch_get_main_queue(), ^{
+            LOG(@"YTKActivator %@ starting (delayed init)", kVersion);
+
+            // Primary: write real keychain values
+            preseedKeychain();
+
+            // Alert suppression
+            swizzleInstanceMethod([UIViewController class],
+                                  @selector(presentViewController:animated:completion:),
+                                  (IMP)hook_presentVC, (IMP *)&orig_presentVC);
+
+            LOG(@"YTKActivator %@ ready", kVersion);
+        });
     } @catch (NSException *e) {
         LOG(@"init exception: %@", e);
     }
