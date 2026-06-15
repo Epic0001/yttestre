@@ -1,12 +1,13 @@
 /*
  *  YTKActivator — Substrate-FREE YTKPlus activator
  *
- *  Strategy:
- *    1. Pre-seed real keychain values before YTKPlus reads them → bVar1=true
- *    2. DYLD_INTERPOSE + fishhook as belt-and-suspenders for post-init calls
- *    3. ObjC swizzles for settings page and alert suppression
+ *  Strategy (5.6.1):
+ *    1. Pre-seed real keychain values so YTKPlus reads them via its own
+ *       dlsym-resolved SecItemCopyMatching → activated path is taken
+ *    2. ObjC swizzles for settings page bypass and license-alert suppression
  *
- *  No CydiaSubstrate, no code patching, no binary patches.
+ *  No CydiaSubstrate, no fishhook, no DYLD_INTERPOSE — all of those caused
+ *  recursion or hangs on 5.6.1. Pure pre-seed + swizzle.
  *  Made by itzzace
  */
 
@@ -17,7 +18,6 @@
 #import <mach-o/dyld.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
-#import "fishhook.h"
 
 // ============================================================
 #pragma mark — Logging
@@ -50,30 +50,13 @@ static NSString *const kYTKVersion             = @"5.6.1";
 static NSString *const kFakeLicense            = @"ACTIVATED-0000-0000";
 
 // ============================================================
-#pragma mark — DYLD_INTERPOSE
+#pragma mark — Real SecItem pointers (resolved via dlsym, used only by us)
 // ============================================================
-#define DYLD_INTERPOSE(_replacement, _replacee) \
-    __attribute__((used)) static struct { \
-        const void *replacement; \
-        const void *replacee; \
-    } _interpose_##_replacee \
-    __attribute__((section("__DATA,__interpose"))) = { \
-        (const void *)(unsigned long)&_replacement, \
-        (const void *)(unsigned long)&_replacee \
-    };
-
-// ============================================================
-#pragma mark — Real SecItem pointers (resolved once, never overwritten)
-// ============================================================
+// We call these directly to write our pre-seed values. We do NOT hook the
+// public symbols — see comment block further down for why.
 static OSStatus (*real_SecItemCopyMatching)(CFDictionaryRef, CFTypeRef *) = NULL;
 static OSStatus (*real_SecItemDelete)(CFDictionaryRef) = NULL;
 static OSStatus (*real_SecItemAdd)(CFDictionaryRef, CFTypeRef *) = NULL;
-
-// Dummy pointers for fishhook output — prevents recursion if DYLD_INTERPOSE
-// already patched the GOT (fishhook would read back our hook address)
-static OSStatus (*_fh_orig_copy)(CFDictionaryRef, CFTypeRef *) = NULL;
-static OSStatus (*_fh_orig_delete)(CFDictionaryRef) = NULL;
-static OSStatus (*_fh_orig_add)(CFDictionaryRef, CFTypeRef *) = NULL;
 
 static void resolveRealSecItem(void) {
     static dispatch_once_t once;
@@ -95,76 +78,25 @@ static void resolveRealSecItem(void) {
 }
 
 // ============================================================
-#pragma mark — SecItem interpose hooks (belt-and-suspenders)
+// REMOVED: SecItem interpose hooks
 // ============================================================
-// These catch any post-constructor keychain calls if DYLD_INTERPOSE works.
-// The primary activation mechanism is the keychain pre-seed in the constructor.
-
-static OSStatus hook_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *result) {
-    @autoreleasepool {
-        if (!real_SecItemCopyMatching) resolveRealSecItem();
-
-        NSDictionary *dict = (__bridge NSDictionary *)query;
-        NSString *service = dict[(__bridge id)kSecAttrService];
-        NSString *account = dict[(__bridge id)kSecAttrAccount];
-
-        if (![service isEqualToString:kService])
-            return real_SecItemCopyMatching(query, result);
-
-        // Seal keys → not found (skips HMAC checks)
-        if ([account isEqualToString:kAuthSeal] || [account isEqualToString:kAuthLastSeal]) {
-            if (result) *result = NULL;
-            return errSecItemNotFound;
-        }
-
-        // Return fake values for known keys
-        NSString *fakeValue = nil;
-        if      ([account isEqualToString:kAuthEmail])        fakeValue = @"bypass@ytk.local";
-        else if ([account isEqualToString:kAuthLicense])      fakeValue = @"BYPASS-0000-0000-0000";
-        else if ([account isEqualToString:kAuthDevice])       fakeValue = @"FAKEDEVICE-YTKActivator";
-        else if ([account isEqualToString:kAuthExpires])      fakeValue = @"01-01-2030 12:00 AM";
-        else if ([account isEqualToString:kAuthSessionToken]) fakeValue = @"FAKETOKEN-YTKActivator";
-        else if ([account isEqualToString:kAuthTimestamp])    fakeValue = @"9999999999";
-        else                                                  fakeValue = @"1";
-
-        if (result) {
-            id returnType = dict[(__bridge id)kSecReturnData];
-            if ([returnType boolValue]) {
-                *result = CFBridgingRetain([fakeValue dataUsingEncoding:NSUTF8StringEncoding]);
-            } else {
-                *result = CFBridgingRetain(fakeValue);
-            }
-        }
-        return errSecSuccess;
-    }
-}
-
-static OSStatus hook_SecItemDelete(CFDictionaryRef query) {
-    @autoreleasepool {
-        if (!real_SecItemDelete) resolveRealSecItem();
-        NSDictionary *dict = (__bridge NSDictionary *)query;
-        NSString *service = dict[(__bridge id)kSecAttrService];
-        if ([service isEqualToString:kService]) return errSecSuccess;
-        return real_SecItemDelete(query);
-    }
-}
-
-static OSStatus hook_SecItemAdd(CFDictionaryRef attributes, CFTypeRef *result) {
-    @autoreleasepool {
-        if (!real_SecItemAdd) resolveRealSecItem();
-        NSDictionary *dict = (__bridge NSDictionary *)attributes;
-        NSString *service = dict[(__bridge id)kSecAttrService];
-        if ([service isEqualToString:kService]) {
-            if (result) *result = NULL;
-            return errSecSuccess;
-        }
-        return real_SecItemAdd(attributes, result);
-    }
-}
-
-DYLD_INTERPOSE(hook_SecItemCopyMatching, SecItemCopyMatching)
-DYLD_INTERPOSE(hook_SecItemDelete,        SecItemDelete)
-DYLD_INTERPOSE(hook_SecItemAdd,           SecItemAdd)
+// Crash analysis showed infinite recursion through hook_SecItemCopyMatching:
+//   __CFStringEqual -> -[__NSCFString isEqual:] -> -[__NSDictionaryI objectForKeyedSubscript:]
+//   -> YTKActivator+0x4080 -> YTKActivator+0x40E8 (~1000 frames -> stack overflow)
+//
+// Why: YTKPlus 5.6.1 resolves SecItem* via dlsym(RTLD_DEFAULT, ...) into a
+// global function pointer (decomp DAT_017ea610, DAT_017ead30, DAT_017eb308,
+// DAT_017eb310). DYLD_INTERPOSE only patches lazy/non-lazy stubs in the GOT,
+// NOT runtime-resolved dlsym lookups. So:
+//   1. YTKPlus's dlsym call inside Security.framework returns the real address
+//   2. But our DYLD_INTERPOSE redirects YouTube's own GOT for SecItemCopyMatching
+//   3. real_SecItemCopyMatching (resolved via dlsym(RTLD_NEXT, ...)) ends up
+//      pointing back at our hook on this build, causing the loop.
+//
+// Solution: drop the interpose hooks entirely. They were only "belt and
+// suspenders" — the primary mechanism is the keychain pre-seed, which writes
+// real values that any caller (YTKPlus or Security.framework directly) reads.
+// Without the hooks, no recursion is possible.
 
 // ============================================================
 #pragma mark — ObjC swizzle helper
@@ -183,22 +115,41 @@ static BOOL swizzleInstanceMethod(Class cls, SEL sel, IMP newImp, IMP *origOut) 
 // ============================================================
 static void (*orig_presentVC)(id, SEL, id, BOOL, id) = NULL;
 
+// Re-entrancy guard. Other tweaks loaded in-process (Choicy, Satella, etc.)
+// also swizzle presentViewController:animated:completion:, and the chain of
+// "previous IMPs" can loop back to us via objc_msgSend, blowing the stack.
+// Crash on 5.6.1 device showed ~1000 recursive frames here.
+static _Thread_local int gPresentVCDepth = 0;
+
 static void hook_presentVC(id self, SEL _cmd, id vc, BOOL animated, id completion) {
-    if ([vc isKindOfClass:[UIAlertController class]]) {
-        UIAlertController *alert = (UIAlertController *)vc;
-        NSString *title   = alert.title   ?: @"";
-        NSString *message = alert.message ?: @"";
-        if ([title containsString:@"license_verification"] ||
-            [title containsString:@"verification_passed"] ||
-            [message containsString:@"Invalid key"] ||
-            [message containsString:@"Invalid signature"] ||
-            [message containsString:@"license_expired"] ||
-            [message containsString:@"License Options"]) {
-            LOG(@"Suppressed license alert");
-            return;
-        }
+    if (gPresentVCDepth > 0) {
+        // Already inside our hook on this thread — don't re-filter, just call
+        // through. method_setImplementation returns the *previous* IMP, but
+        // calling it routes back through objc_msgSend → the current IMP (us).
+        // Bail out via objc_msgSendSuper-equivalent: we can't easily get the
+        // real original here, so just no-op to break the loop.
+        return;
     }
-    if (orig_presentVC) orig_presentVC(self, _cmd, vc, animated, completion);
+    gPresentVCDepth++;
+    @try {
+        if ([vc isKindOfClass:[UIAlertController class]]) {
+            UIAlertController *alert = (UIAlertController *)vc;
+            NSString *title   = alert.title   ?: @"";
+            NSString *message = alert.message ?: @"";
+            if ([title containsString:@"license_verification"] ||
+                [title containsString:@"verification_passed"] ||
+                [message containsString:@"Invalid key"] ||
+                [message containsString:@"Invalid signature"] ||
+                [message containsString:@"license_expired"] ||
+                [message containsString:@"License Options"]) {
+                LOG(@"Suppressed license alert");
+                return;
+            }
+        }
+        if (orig_presentVC) orig_presentVC(self, _cmd, vc, animated, completion);
+    } @finally {
+        gPresentVCDepth--;
+    }
 }
 
 // ============================================================
@@ -374,14 +325,6 @@ static void dyld_callback(const struct mach_header *mh, intptr_t slide) {
 
         ytkPlusFound = YES;
         LOG(@"YTKPlus detected");
-
-        // fishhook: rewrite YTKPlus's GOT (belt-and-suspenders for post-init calls)
-        struct rebinding rebs[3] = {
-            { "SecItemCopyMatching", (void *)hook_SecItemCopyMatching, (void **)&_fh_orig_copy },
-            { "SecItemDelete",        (void *)hook_SecItemDelete,        (void **)&_fh_orig_delete },
-            { "SecItemAdd",           (void *)hook_SecItemAdd,           (void **)&_fh_orig_add },
-        };
-        rebind_symbols_image((void *)mh, slide, rebs, 3);
 
         // Wait for runtime classes, then install ObjC swizzles
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
