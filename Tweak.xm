@@ -428,14 +428,18 @@ __attribute__((constructor))
 static void init(void) {
     @try {
         resolveRealSecItem();
-
-        // Pre-seed keychain IMMEDIATELY — must complete before YTKPlus's
-        // application:didFinishLaunchingWithOptions: reads any of these keys.
-        // The old 5-second delay let YTKPlus fail its check first, then fire
-        // the synchronous network call to ikghd.site that caused the watchdog
-        // hang at launch.
         LOG(@"YTKActivator %@ starting", kVersion);
-        preseedKeychain();
+
+        // Pre-seed on a background queue. Calling SecItem* directly from
+        // the constructor blocks the main thread on the keychain daemon's
+        // XPC handshake during early launch, which trips the watchdog.
+        // Offloading to a bg queue lets the constructor return immediately
+        // and the writes still finish well before YTKPlus's
+        // application:didFinishLaunchingWithOptions: reads any keys.
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            preseedKeychain();
+            LOG(@"YTKActivator %@ keychain ready", kVersion);
+        });
 
         // Register dyld callback (catches YTKPlus image load for ObjC swizzles)
         _dyld_register_func_for_add_image(dyld_callback);
