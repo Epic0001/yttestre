@@ -47,10 +47,6 @@ static NSString *const kActivationLoggedForKey = @"activation_logged_for_key";
 static NSString *const kLastStatsVersion       = @"lastStatsReportedVersion";
 static NSString *const kAuthStatusSecure       = @"auth_status_secure";
 static NSString *const kYTKVersion             = @"5.6.1";
-static NSString *const kActivationLoggedForKey = @"activation_logged_for_key";
-static NSString *const kLastStatsVersion       = @"lastStatsReportedVersion";
-static NSString *const kAuthStatusSecure       = @"auth_status_secure";
-static NSString *const kYTKVersion             = @"5.6.1";
 static NSString *const kFakeLicense            = @"ACTIVATED-0000-0000";
 
 // ============================================================
