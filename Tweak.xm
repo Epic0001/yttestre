@@ -43,6 +43,11 @@ static NSString *const kAuthLastSeal     = @"auth_last_verified_seal";
 static NSString *const kEnabledStatus    = @"Enabledytk_status";
 static NSString *const kActivationLogged = @"activation_logged";
 static NSString *const kStatsSent        = @"stats_sent_before";
+static NSString *const kActivationLoggedForKey = @"activation_logged_for_key";
+static NSString *const kLastStatsVersion       = @"lastStatsReportedVersion";
+static NSString *const kAuthStatusSecure       = @"auth_status_secure";
+static NSString *const kYTKVersion             = @"5.6.1";
+static NSString *const kFakeLicense            = @"ACTIVATED-0000-0000";
 
 // ============================================================
 #pragma mark — DYLD_INTERPOSE
@@ -292,13 +297,28 @@ static void preseedKeychain(void) {
     writeKeychainValue(kActivationLogged, @"1");
     writeKeychainValue(kStatsSent,        @"1");
     writeKeychainValue(kAuthEmail,        @"activated@ytk.local");
-    writeKeychainValue(kAuthLicense,      @"ACTIVATED-0000-0000");
+    writeKeychainValue(kAuthLicense,      kFakeLicense);
     writeKeychainValue(kAuthDevice,       @"YTKActivator");
     writeKeychainValue(kAuthExpires,      @"01-01-2030 12:00 AM");
     writeKeychainValue(kAuthSessionToken, @"YTKActivator-Token");
     writeKeychainValue(kAuthTimestamp,    @"9999999999");
-    writeKeychainValue(kAuthSeal,     nil); // DELETE — skips HMAC → bVar1=true
-    writeKeychainValue(kAuthLastSeal, nil); // DELETE
+
+    // Skip server-side activation: YTKPlus only POSTs to ikghd.site when
+    // activation_logged_for_key != auth_license_secure. Match them so the
+    // call never fires (decomp FUN_0003db08 line 33321).
+    writeKeychainValue(kActivationLoggedForKey, kFakeLicense);
+
+    // Skip server-side stats: YTKPlus only POSTs when lastStatsReportedVersion
+    // != current tweak version (decomp FUN_0003d334 line 33173).
+    writeKeychainValue(kLastStatsVersion, kYTKVersion);
+
+    // Mark auth as already verified so detectModification's caller branches
+    // into the "authenticated" path (decomp line 33191).
+    writeKeychainValue(kAuthStatusSecure, @"1");
+
+    // Leave seal keys alone — 5.6.1's detectModification only checks for
+    // FridaGadget in dyld images, NOT seal validity. Deleting the seal was
+    // what triggered "incompatible environment" on 5.6.1.
 }
 
 // ============================================================
@@ -409,24 +429,24 @@ static void init(void) {
     @try {
         resolveRealSecItem();
 
-        // Register dyld callback immediately (catches YTKPlus image load)
+        // Pre-seed keychain IMMEDIATELY — must complete before YTKPlus's
+        // application:didFinishLaunchingWithOptions: reads any of these keys.
+        // The old 5-second delay let YTKPlus fail its check first, then fire
+        // the synchronous network call to ikghd.site that caused the watchdog
+        // hang at launch.
+        LOG(@"YTKActivator %@ starting", kVersion);
+        preseedKeychain();
+
+        // Register dyld callback (catches YTKPlus image load for ObjC swizzles)
         _dyld_register_func_for_add_image(dyld_callback);
 
-        // Delay everything else by 5 seconds to let YTK finish initializing
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC),
-                       dispatch_get_main_queue(), ^{
-            LOG(@"YTKActivator %@ starting (delayed init)", kVersion);
+        // Alert suppression — safe to swizzle UIViewController immediately,
+        // it's already loaded by the time any tweak constructor runs.
+        swizzleInstanceMethod([UIViewController class],
+                              @selector(presentViewController:animated:completion:),
+                              (IMP)hook_presentVC, (IMP *)&orig_presentVC);
 
-            // Primary: write real keychain values
-            preseedKeychain();
-
-            // Alert suppression
-            swizzleInstanceMethod([UIViewController class],
-                                  @selector(presentViewController:animated:completion:),
-                                  (IMP)hook_presentVC, (IMP *)&orig_presentVC);
-
-            LOG(@"YTKActivator %@ ready", kVersion);
-        });
+        LOG(@"YTKActivator %@ ready", kVersion);
     } @catch (NSException *e) {
         LOG(@"init exception: %@", e);
     }
