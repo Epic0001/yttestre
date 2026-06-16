@@ -1,24 +1,29 @@
 /*
- *  YTKHelper / YTKActivator v2.3 — preseed + openCheckLicense swizzle
+ *  YTKHelper / YTKActivator v2.4-debug — on-screen debug popups
  *
- *  Same v2.2 keychain preseed (force-fail seal verifier, empty banlists),
- *  PLUS a runtime swizzle of -openCheckLicense on every class that declares
- *  it. The new IMP skips the License Options popup and directly presents
- *  RootOptionsController in a UINavigationController — exactly the same
- *  three-call sequence YTKPlus uses on the success path of its URLSession
- *  flow (see decomp 99428-99435).
+ *  Same v2.3 logic (preseed + openCheckLicense swizzle + dyld fallback)
+ *  with verbose UIAlertController popups at every key checkpoint so you
+ *  can verify on a glitched device whether the swizzle is actually
+ *  installing and intercepting.
  *
- *  Why this works:
- *    The gear button's UIAction handler (FUN_b1a8) tries an NSURLSession
- *    request to the YTKPlus license server. On servers/networks where that
- *    fails — or when the keychain identity check fails — it falls through
- *    to -openCheckLicense, which shows the "License Options" popup. By
- *    redirecting -openCheckLicense to the success-path opener, the gear
- *    tap always lands on RootOptionsController regardless of network.
+ *  Popups you should see, in order:
+ *    1. ~2s after launch:  "v2.4-debug: constructor results"
+ *         - preseed: done
+ *         - classes swizzled at constructor time
+ *         - RootOptionsController loaded? YES/NO
+ *         - dyld callback: registered or skipped
+ *    2. (only if RootOptionsController wasn't loaded at constructor time)
+ *       Once YTKPlus.dylib finally loads:
+ *         "dyld late-swizzle: N classes patched"
+ *    3. When you tap the gear button:
+ *         "openCheckLicense INTERCEPTED on <ClassName>"
+ *         immediately followed by RootOptionsController presenting.
  *
- *  Built twice via GitHub Actions:
- *    - YTKHelper.dylib  (current safe name)
- *    - YTKActivator.dylib (legacy name)
+ *  If you see (1) with classes=0 and RootOptionsController=NO, then
+ *  YTKPlus.dylib is loading after us — wait for popup (2). If you NEVER
+ *  see popup (3) when you tap gear, the swizzle didn't land on the right
+ *  class (or the gear tap goes through a different code path on this
+ *  build).
  *
  *  Made by itzzace
  */
@@ -37,6 +42,68 @@ static NSString *const kFakeLicense = @"ACTIVATED-0000-0000";
 static NSString *const kYTKVersion  = @"5.6.1";
 static NSString *const kJunkSeal    = @"INVALID-SEAL-FORCE-VERIFY-FAIL";
 static NSString *const kFutureTs    = @"9999999999.000";
+
+// ============================================================
+#pragma mark — Debug popup plumbing
+// ============================================================
+
+static UIViewController *ytk_topVC(void) {
+    UIWindowScene *ws = nil;
+    for (UIScene *s in [UIApplication sharedApplication].connectedScenes) {
+        if ([s isKindOfClass:[UIWindowScene class]] &&
+            s.activationState == UISceneActivationStateForegroundActive) {
+            ws = (UIWindowScene *)s; break;
+        }
+    }
+    if (!ws) {
+        for (UIScene *s in [UIApplication sharedApplication].connectedScenes)
+            if ([s isKindOfClass:[UIWindowScene class]]) { ws = (UIWindowScene *)s; break; }
+    }
+    UIViewController *top = nil;
+    for (UIWindow *w in ws.windows)
+        if (w.isKeyWindow) { top = w.rootViewController; break; }
+    if (!top)
+        for (UIWindow *w in ws.windows)
+            if (top == nil) { top = w.rootViewController; }
+    while (top.presentedViewController) top = top.presentedViewController;
+    return top;
+}
+
+// Show a popup. Safe to call from any thread / any time. Defers if UI
+// isn't up yet by retrying on main queue every 0.5s up to 20 attempts.
+static void ytk_debugPopup(NSString *title, NSString *body) {
+    LOG(@"POPUP: %@ — %@", title, body);
+    static int (^showAttempt)(NSString *, NSString *, int);
+    showAttempt = ^int(NSString *t, NSString *b, int attempt) {
+        UIViewController *host = ytk_topVC();
+        if (!host) return 0;
+        UIAlertController *alert = [UIAlertController
+            alertControllerWithTitle:t
+            message:b
+            preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"OK"
+                                                  style:UIAlertActionStyleDefault
+                                                handler:nil]];
+        [host presentViewController:alert animated:YES completion:nil];
+        return 1;
+    };
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        __block int attempt = 0;
+        __block void (^retry)(void);
+        retry = ^{
+            attempt++;
+            if (showAttempt(title, body, attempt)) return;
+            if (attempt >= 20) {
+                LOG(@"POPUP gave up after 20 retries: %@", title);
+                return;
+            }
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), retry);
+        };
+        retry();
+    });
+}
 
 // ============================================================
 #pragma mark — Keychain pre-seed
@@ -89,58 +156,36 @@ static void preseedKeychain(void) {
 
     writeKeychainValue(@"auth_integrity_seal", nil);
 
-    LOG(@"Keychain pre-seeded (v2.3)");
+    LOG(@"Keychain pre-seeded (v2.4-debug)");
 }
 
 // ============================================================
-#pragma mark — RootOptionsController opener (success-path replica)
+#pragma mark — RootOptionsController opener
 // ============================================================
-//
-// Replicates decomp lines 99428-99435 exactly:
-//
-//   Class roc = NSClassFromString(@"RootOptionsController");
-//   id vc    = [[roc alloc] initWithStyle:UITableViewStyleGrouped];
-//   id nav   = [[UINavigationController alloc] initWithRootViewController:vc];
-//   [nav setModalPresentationStyle:UIModalPresentationFullScreen]; // 0
-//   [self presentViewController:nav animated:YES completion:nil];
-//
-// `self` here is the host VC (DownloadsController, DownloadsController2,
-// or TabBarSettingsViewController) — whichever one openCheckLicense was
-// originally invoked on.
-
 static void ytk_presentRootOptions(id self) {
     Class roc = NSClassFromString(@"RootOptionsController");
     if (!roc) {
-        LOG(@"RootOptionsController class missing — cannot open settings");
+        ytk_debugPopup(@"OPEN FAILED",
+            @"RootOptionsController class is NIL at present time.\n"
+             "YTKPlus.dylib didn't load, or the class was renamed.");
         return;
     }
 
-    // initWithStyle:1  (UITableViewStyleGrouped)
     id vc = ((id (*)(id, SEL))objc_msgSend)([roc alloc],
                                             sel_registerName("initWithStyle:"));
-    // ARC-incompatible: initWithStyle: returns a +1 retained instance via
-    // alloc/init, which is what we want — passed straight into nav below
-    // and balanced when nav is dismissed.
     id nav = [[UINavigationController alloc] initWithRootViewController:vc];
     [nav setModalPresentationStyle:UIModalPresentationFullScreen];
 
     UIViewController *host = self;
     if (![host isKindOfClass:[UIViewController class]]) {
-        // openCheckLicense is only declared on view controllers, but be
-        // defensive — fall back to keyWindow rootVC.
-        UIWindowScene *ws = nil;
-        for (UIScene *s in [UIApplication sharedApplication].connectedScenes)
-            if ([s isKindOfClass:[UIWindowScene class]]) { ws = (UIWindowScene *)s; break; }
-        for (UIWindow *w in ws.windows)
-            if (w.isKeyWindow) { host = w.rootViewController; break; }
-        while (host.presentedViewController) host = host.presentedViewController;
+        host = ytk_topVC();
     }
 
     if (host) {
         [host presentViewController:nav animated:YES completion:nil];
         LOG(@"Presented RootOptionsController on %@", NSStringFromClass([host class]));
     } else {
-        LOG(@"No host VC to present RootOptionsController on");
+        ytk_debugPopup(@"OPEN FAILED", @"No host VC available to present from.");
     }
 }
 
@@ -150,87 +195,43 @@ static void ytk_presentRootOptions(id self) {
 
 static SEL kOpenCheckLicenseSel = NULL;
 
-// Replacement IMP for -[X openCheckLicense]. Signature: void(id, SEL).
 static void ytk_openCheckLicense_replacement(id self, SEL _cmd) {
-    LOG(@"-[%@ openCheckLicense] intercepted — opening RootOptionsController",
-        NSStringFromClass([self class]));
-    ytk_presentRootOptions(self);
+    NSString *cls = NSStringFromClass([self class]);
+    LOG(@"-[%@ openCheckLicense] intercepted", cls);
+    ytk_debugPopup(@"SWIZZLE HIT",
+        ([NSString stringWithFormat:
+            @"-[%@ openCheckLicense] intercepted.\n\n"
+             "Now presenting RootOptionsController...",
+            cls]));
+    // Defer the actual present a tick so the debug popup has a chance to
+    // appear first. UIAlertController and presentViewController fight if
+    // you queue them back-to-back on the same VC.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        ytk_presentRootOptions(self);
+    });
 }
 
-// Swizzle every class that defines -openCheckLicense to point at our IMP.
-// Walking the runtime is needed because YTKPlus declares it on multiple
-// host VCs (DownloadsController, DownloadsController2, TabBarSettingsViewController)
-// and we don't know which one the user's tap will invoke.
-static void ytk_swizzleOpenCheckLicense(void) {
+// Returns number of classes whose -openCheckLicense IMP we replaced.
+static int ytk_runSwizzlePass(NSMutableString *report) {
     if (!kOpenCheckLicenseSel) kOpenCheckLicenseSel = sel_registerName("openCheckLicense");
 
     unsigned int classCount = 0;
     Class *classes = objc_copyClassList(&classCount);
-    if (!classes) {
-        LOG(@"objc_copyClassList returned NULL");
-        return;
-    }
+    if (!classes) return 0;
 
     int swizzled = 0;
     for (unsigned int i = 0; i < classCount; i++) {
         Class cls = classes[i];
-
-        // class_getInstanceMethod walks the inheritance chain, which would
-        // double-count subclasses. Use class_copyMethodList to find only
-        // methods directly declared on this class.
         unsigned int methodCount = 0;
         Method *methods = class_copyMethodList(cls, &methodCount);
-        if (!methods) continue;
-
-        for (unsigned int j = 0; j < methodCount; j++) {
-            if (method_getName(methods[j]) == kOpenCheckLicenseSel) {
-                IMP old = method_setImplementation(methods[j],
-                    (IMP)ytk_openCheckLicense_replacement);
-                LOG(@"Swizzled -[%s openCheckLicense] (old IMP %p)",
-                    class_getName(cls), old);
-                swizzled++;
-                break;
-            }
-        }
-        free(methods);
-    }
-    free(classes);
-
-    LOG(@"openCheckLicense swizzle complete — %d class(es) patched", swizzled);
-
-    if (swizzled == 0) {
-        // YTKPlus.dylib hasn't been linked yet at constructor time. Register
-        // a dyld callback that re-runs the swizzle once each new image lands;
-        // YTKPlus.dylib will eventually be one of them.
-        LOG(@"No classes matched yet — installing dyld_register_func_for_add_image fallback");
-    }
-}
-
-// dyld add-image callback — fires for every newly-loaded image. We only
-// need to re-attempt the swizzle until it sticks at least once.
-static volatile int kSwizzleSucceeded = 0;
-static void ytk_addImageCallback(const struct mach_header *mh, intptr_t slide) {
-    if (kSwizzleSucceeded) return;
-
-    if (!kOpenCheckLicenseSel) kOpenCheckLicenseSel = sel_registerName("openCheckLicense");
-    Class roc = NSClassFromString(@"RootOptionsController");
-    if (!roc) return; // YTKPlus classes still not registered
-
-    unsigned int classCount = 0;
-    Class *classes = objc_copyClassList(&classCount);
-    if (!classes) return;
-
-    int swizzled = 0;
-    for (unsigned int i = 0; i < classCount; i++) {
-        unsigned int methodCount = 0;
-        Method *methods = class_copyMethodList(classes[i], &methodCount);
         if (!methods) continue;
         for (unsigned int j = 0; j < methodCount; j++) {
             if (method_getName(methods[j]) == kOpenCheckLicenseSel) {
                 method_setImplementation(methods[j],
                     (IMP)ytk_openCheckLicense_replacement);
-                LOG(@"[dyld-cb] Swizzled -[%s openCheckLicense]",
-                    class_getName(classes[i]));
+                if (report) [report appendFormat:@"  - %s\n", class_getName(cls)];
+                LOG(@"Swizzled -[%s openCheckLicense]", class_getName(cls));
                 swizzled++;
                 break;
             }
@@ -238,10 +239,30 @@ static void ytk_addImageCallback(const struct mach_header *mh, intptr_t slide) {
         free(methods);
     }
     free(classes);
+    return swizzled;
+}
+
+// ============================================================
+#pragma mark — dyld late-swizzle fallback
+// ============================================================
+static volatile int kSwizzleSucceeded = 0;
+
+static void ytk_addImageCallback(const struct mach_header *mh, intptr_t slide) {
+    if (kSwizzleSucceeded) return;
+
+    Class roc = NSClassFromString(@"RootOptionsController");
+    if (!roc) return; // YTKPlus classes still not registered
+
+    NSMutableString *report = [NSMutableString string];
+    int swizzled = ytk_runSwizzlePass(report);
 
     if (swizzled > 0) {
         kSwizzleSucceeded = 1;
-        LOG(@"[dyld-cb] swizzle landed (%d classes)", swizzled);
+        ytk_debugPopup(@"dyld late-swizzle",
+            ([NSString stringWithFormat:
+                @"YTKPlus.dylib loaded after us.\n"
+                 "Late swizzle landed on %d class(es):\n%@",
+                swizzled, report]));
     }
 }
 
@@ -251,15 +272,35 @@ static void ytk_addImageCallback(const struct mach_header *mh, intptr_t slide) {
 __attribute__((constructor))
 static void init(void) {
     preseedKeychain();
-    LOG(@"YTKHelper v2.3 loaded");
+    LOG(@"YTKHelper v2.4-debug loaded");
 
-    // Try the swizzle now. If YTKPlus.dylib isn't loaded yet (load-order
-    // dependent in injected IPAs), the dyld callback will catch it.
-    ytk_swizzleOpenCheckLicense();
-    if (NSClassFromString(@"RootOptionsController") != nil) {
+    NSMutableString *classesReport = [NSMutableString string];
+    int swizzledNow = ytk_runSwizzlePass(classesReport);
+    BOOL rocLoaded  = (NSClassFromString(@"RootOptionsController") != nil);
+    BOOL needDyldCb = !rocLoaded || swizzledNow == 0;
+
+    if (rocLoaded && swizzledNow > 0) {
         kSwizzleSucceeded = 1;
-    } else {
-        _dyld_register_func_for_add_image(ytk_addImageCallback);
-        LOG(@"Registered dyld add-image callback for late YTKPlus load");
     }
+    if (needDyldCb) {
+        _dyld_register_func_for_add_image(ytk_addImageCallback);
+    }
+
+    NSString *body = [NSString stringWithFormat:
+        @"v2.4-debug constructor results:\n\n"
+         "preseed: DONE\n"
+         "classes swizzled now: %d\n%@"
+         "RootOptionsController loaded: %@\n"
+         "dyld callback: %@\n\n"
+         "Tap gear in YTKPlus menu to test. You should see a SWIZZLE HIT popup.",
+        swizzledNow,
+        (swizzledNow > 0 ? classesReport : @""),
+        rocLoaded ? @"YES" : @"NO",
+        needDyldCb ? @"REGISTERED" : @"skipped (already done)"];
+
+    // Defer the boot popup until UI is plausibly up.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        ytk_debugPopup(@"YTKHelper v2.4-debug", body);
+    });
 }
