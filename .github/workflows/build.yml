@@ -1,4 +1,4 @@
-name: Build YTKActivator
+name: Build YTKHelper
 
 on:
   push:

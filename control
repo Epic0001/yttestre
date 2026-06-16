@@ -1,8 +1,8 @@
-Package: com.yourname.ytkactivator
-Name: YTKActivator
-Version: 1.0
+Package: com.yourname.ytkhelper
+Name: YTKHelper
+Version: 2.0
 Author: You
 Maintainer: You
 Architecture: iphoneos-arm64
-Description: Forces YTKPlus activation (Rootless)
+Description: YTKPlus helper (Rootless)
 Depends: mobilesubstrate

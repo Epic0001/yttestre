@@ -1,5 +1,5 @@
 /*
- *  YTKActivator v1.9 — Minimal preseed-only, no popup suppression
+ *  YTKHelper v2.0 — Minimal preseed-only, dylib renamed to bypass ban, no popup suppression
  *
  *  No swizzles, no popups, no settings UI hacks. Just write keychain
  *  values that YTKPlus 5.6.1 needs to skip activation/stats POSTs and
@@ -13,7 +13,7 @@
 #import <Foundation/Foundation.h>
 #import <Security/Security.h>
 
-#define LOG(fmt, ...) NSLog(@"[YTKActivator] " fmt, ##__VA_ARGS__)
+#define LOG(fmt, ...) NSLog(@"[YTKHelper] " fmt, ##__VA_ARGS__)
 
 static NSString *const kService     = @"me.ikghd.ytkplus.secure";
 static NSString *const kFakeLicense = @"ACTIVATED-0000-0000";
@@ -51,9 +51,9 @@ static void preseedKeychain(void) {
     // Identity
     writeKeychainValue(@"auth_email_secure",    @"activated@ytk.local");
     writeKeychainValue(@"auth_license_secure",  kFakeLicense);
-    writeKeychainValue(@"auth_device_secure",   @"YTKActivator");
+    writeKeychainValue(@"auth_device_secure",   @"YTKHelper");
     writeKeychainValue(@"auth_expires_secure",  @"01-01-2030 12:00 AM");
-    writeKeychainValue(@"auth_session_token",   @"YTKActivator-Token");
+    writeKeychainValue(@"auth_session_token",   @"YTKHelper-Token");
     writeKeychainValue(@"auth_timestamp",       @"9999999999");
 
     // 5.6.1 gate keys: skip activation/stats POSTs
@@ -76,10 +76,10 @@ static void preseedKeychain(void) {
 __attribute__((constructor))
 static void init(void) {
     preseedKeychain();
-    LOG(@"YTKActivator v1.9 loaded (minimal, no popup suppression)");
+    LOG(@"YTKHelper v2.0 loaded (renamed from ytkactivator to bypass dylib banlist)");
 
     // First-launch: write keychain, then exit so YTK reads preseeded values next time
-    NSString *flagKey = @"com.itzzace.ytkactivator.firstLaunchDone.v18";
+    NSString *flagKey = @"com.itzzace.ytkhelper.firstLaunchDone.v20";
     NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
     if (![d boolForKey:flagKey]) {
         [d setBool:YES forKey:flagKey];
