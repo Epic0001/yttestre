@@ -69,39 +69,45 @@ static UIViewController *ytk_topVC(void) {
     return top;
 }
 
+// Try once to show a popup; returns YES if presented. Main-thread only.
+static BOOL ytk_tryShowPopup(NSString *title, NSString *body) {
+    UIViewController *host = ytk_topVC();
+    if (!host) return NO;
+    UIAlertController *alert = [UIAlertController
+        alertControllerWithTitle:title
+        message:body
+        preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK"
+                                              style:UIAlertActionStyleDefault
+                                            handler:nil]];
+    [host presentViewController:alert animated:YES completion:nil];
+    return YES;
+}
+
+// Recursive C function — schedules itself on main queue without any
+// __block self-capturing block (which is what triggered the
+// -Warc-retain-cycles error in v2.4-debug).
+static void ytk_popupRetry(NSString *title, NSString *body, int attempt) {
+    if (ytk_tryShowPopup(title, body)) return;
+    if (attempt >= 20) {
+        LOG(@"POPUP gave up after 20 retries: %@", title);
+        return;
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        ytk_popupRetry(title, body, attempt + 1);
+    });
+}
+
 // Show a popup. Safe to call from any thread / any time. Defers if UI
 // isn't up yet by retrying on main queue every 0.5s up to 20 attempts.
 static void ytk_debugPopup(NSString *title, NSString *body) {
     LOG(@"POPUP: %@ — %@", title, body);
-    static int (^showAttempt)(NSString *, NSString *, int);
-    showAttempt = ^int(NSString *t, NSString *b, int attempt) {
-        UIViewController *host = ytk_topVC();
-        if (!host) return 0;
-        UIAlertController *alert = [UIAlertController
-            alertControllerWithTitle:t
-            message:b
-            preferredStyle:UIAlertControllerStyleAlert];
-        [alert addAction:[UIAlertAction actionWithTitle:@"OK"
-                                                  style:UIAlertActionStyleDefault
-                                                handler:nil]];
-        [host presentViewController:alert animated:YES completion:nil];
-        return 1;
-    };
-
+    // Capture by value into the block; ytk_popupRetry schedules itself.
+    NSString *t = [title copy];
+    NSString *b = [body copy];
     dispatch_async(dispatch_get_main_queue(), ^{
-        __block int attempt = 0;
-        __block void (^retry)(void);
-        retry = ^{
-            attempt++;
-            if (showAttempt(title, body, attempt)) return;
-            if (attempt >= 20) {
-                LOG(@"POPUP gave up after 20 retries: %@", title);
-                return;
-            }
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
-                           dispatch_get_main_queue(), retry);
-        };
-        retry();
+        ytk_popupRetry(t, b, 1);
     });
 }
 
