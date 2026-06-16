@@ -23,11 +23,11 @@ jobs:
       - name: Locate built dylib
         id: locate
         run: |
-          DYLIB=$(find . -name 'YTKActivator.dylib' -path '*obj*' | head -n 1)
+          DYLIB=$(find . -name 'YTKHelper.dylib' -path '*obj*' | head -n 1)
           echo "Found: $DYLIB"
           mkdir -p out
-          cp "$DYLIB" out/YTKActivator.dylib
-          echo "dylib_path=out/YTKActivator.dylib" >> $GITHUB_OUTPUT
+          cp "$DYLIB" out/YTKHelper.dylib
+          echo "dylib_path=out/YTKHelper.dylib" >> $GITHUB_OUTPUT
 
       - name: Fix install_name for IPA injection
         run: |
@@ -57,5 +57,5 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: YTKActivator
+          name: YTKHelper
           path: out/*
