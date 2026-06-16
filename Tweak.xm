@@ -1,5 +1,5 @@
 /*
- *  YTKActivator v1.8 — Minimal preseed-only
+ *  YTKActivator v1.9 — Minimal preseed-only, no popup suppression
  *
  *  No swizzles, no popups, no settings UI hacks. Just write keychain
  *  values that YTKPlus 5.6.1 needs to skip activation/stats POSTs and
@@ -76,7 +76,7 @@ static void preseedKeychain(void) {
 __attribute__((constructor))
 static void init(void) {
     preseedKeychain();
-    LOG(@"YTKActivator v1.8 loaded (minimal)");
+    LOG(@"YTKActivator v1.9 loaded (minimal, no popup suppression)");
 
     // First-launch: write keychain, then exit so YTK reads preseeded values next time
     NSString *flagKey = @"com.itzzace.ytkactivator.firstLaunchDone.v18";
