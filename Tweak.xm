@@ -1,12 +1,12 @@
 /*
- *  YTKActivator — Substrate-FREE YTKPlus activator
+ *  YTKActivator v1.7 — No-interpose, aggressive preseed strategy
  *
- *  Strategy:
- *    1. Pre-seed real keychain values before YTKPlus reads them → bVar1=true
- *    2. DYLD_INTERPOSE + fishhook as belt-and-suspenders for post-init calls
- *    3. ObjC swizzles for settings page and alert suppression
+ *  Strategy: write keychain values multiple times so they persist for
+ *  YTKPlus's next launch. First launch shows popup then exits, second
+ *  launch onward activates fully. Includes 5.6.1-specific gate keys
+ *  (activation_logged_for_key, lastStatsReportedVersion) to skip the
+ *  "Service unavailable" server check.
  *
- *  No CydiaSubstrate, no code patching, no binary patches.
  *  Made by itzzace
  */
 
@@ -17,154 +17,12 @@
 #import <mach-o/dyld.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
-#import "fishhook.h"
 
-// ============================================================
-#pragma mark — Logging
-// ============================================================
 #define LOG(fmt, ...) NSLog(@"[YTKActivator] " fmt, ##__VA_ARGS__)
 
-// ============================================================
-#pragma mark — Constants
-// ============================================================
-static NSString *const kService      = @"me.ikghd.ytkplus.secure";
-static NSString *const kVersionKey   = @"com.itzzace.ytkactivator.version";
-static NSString *const kVersion      = @"1.0";
-static BOOL ytkPlusFound = NO;
-
-static NSString *const kAuthEmail        = @"auth_email_secure";
-static NSString *const kAuthLicense      = @"auth_license_secure";
-static NSString *const kAuthDevice       = @"auth_device_secure";
-static NSString *const kAuthExpires      = @"auth_expires_secure";
-static NSString *const kAuthSessionToken = @"auth_session_token";
-static NSString *const kAuthTimestamp    = @"auth_timestamp";
-static NSString *const kAuthSeal         = @"auth_integrity_seal";
-static NSString *const kAuthLastSeal     = @"auth_last_verified_seal";
-static NSString *const kEnabledStatus    = @"Enabledytk_status";
-static NSString *const kActivationLogged = @"activation_logged";
-static NSString *const kStatsSent        = @"stats_sent_before";
-static NSString *const kActivationLoggedForKey = @"activation_logged_for_key";
-static NSString *const kLastStatsVersion       = @"lastStatsReportedVersion";
-static NSString *const kAuthStatusSecure       = @"auth_status_secure";
-static NSString *const kYTKVersion             = @"5.6.1";
-static NSString *const kFakeLicense            = @"ACTIVATED-0000-0000";
-
-// ============================================================
-#pragma mark — DYLD_INTERPOSE
-// ============================================================
-#define DYLD_INTERPOSE(_replacement, _replacee) \
-    __attribute__((used)) static struct { \
-        const void *replacement; \
-        const void *replacee; \
-    } _interpose_##_replacee \
-    __attribute__((section("__DATA,__interpose"))) = { \
-        (const void *)(unsigned long)&_replacement, \
-        (const void *)(unsigned long)&_replacee \
-    };
-
-// ============================================================
-#pragma mark — Real SecItem pointers (resolved once, never overwritten)
-// ============================================================
-static OSStatus (*real_SecItemCopyMatching)(CFDictionaryRef, CFTypeRef *) = NULL;
-static OSStatus (*real_SecItemDelete)(CFDictionaryRef) = NULL;
-static OSStatus (*real_SecItemAdd)(CFDictionaryRef, CFTypeRef *) = NULL;
-
-// Dummy pointers for fishhook output — prevents recursion if DYLD_INTERPOSE
-// already patched the GOT (fishhook would read back our hook address)
-static OSStatus (*_fh_orig_copy)(CFDictionaryRef, CFTypeRef *) = NULL;
-static OSStatus (*_fh_orig_delete)(CFDictionaryRef) = NULL;
-static OSStatus (*_fh_orig_add)(CFDictionaryRef, CFTypeRef *) = NULL;
-
-static void resolveRealSecItem(void) {
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        void *sec = dlopen("/System/Library/Frameworks/Security.framework/Security", RTLD_NOW | RTLD_NOLOAD);
-        if (!sec) sec = dlopen("/System/Library/Frameworks/Security.framework/Security", RTLD_NOW);
-        if (sec) {
-            real_SecItemCopyMatching = (OSStatus (*)(CFDictionaryRef, CFTypeRef *))dlsym(sec, "SecItemCopyMatching");
-            real_SecItemDelete       = (OSStatus (*)(CFDictionaryRef))dlsym(sec, "SecItemDelete");
-            real_SecItemAdd          = (OSStatus (*)(CFDictionaryRef, CFTypeRef *))dlsym(sec, "SecItemAdd");
-        }
-        if (!real_SecItemCopyMatching)
-            real_SecItemCopyMatching = (OSStatus (*)(CFDictionaryRef, CFTypeRef *))dlsym(RTLD_NEXT, "SecItemCopyMatching");
-        if (!real_SecItemDelete)
-            real_SecItemDelete = (OSStatus (*)(CFDictionaryRef))dlsym(RTLD_NEXT, "SecItemDelete");
-        if (!real_SecItemAdd)
-            real_SecItemAdd = (OSStatus (*)(CFDictionaryRef, CFTypeRef *))dlsym(RTLD_NEXT, "SecItemAdd");
-    });
-}
-
-// ============================================================
-#pragma mark — SecItem interpose hooks (belt-and-suspenders)
-// ============================================================
-// These catch any post-constructor keychain calls if DYLD_INTERPOSE works.
-// The primary activation mechanism is the keychain pre-seed in the constructor.
-
-static OSStatus hook_SecItemCopyMatching(CFDictionaryRef query, CFTypeRef *result) {
-    @autoreleasepool {
-        if (!real_SecItemCopyMatching) resolveRealSecItem();
-
-        NSDictionary *dict = (__bridge NSDictionary *)query;
-        NSString *service = dict[(__bridge id)kSecAttrService];
-        NSString *account = dict[(__bridge id)kSecAttrAccount];
-
-        if (![service isEqualToString:kService])
-            return real_SecItemCopyMatching(query, result);
-
-        // Seal keys → not found (skips HMAC checks)
-        if ([account isEqualToString:kAuthSeal] || [account isEqualToString:kAuthLastSeal]) {
-            if (result) *result = NULL;
-            return errSecItemNotFound;
-        }
-
-        // Return fake values for known keys
-        NSString *fakeValue = nil;
-        if      ([account isEqualToString:kAuthEmail])        fakeValue = @"bypass@ytk.local";
-        else if ([account isEqualToString:kAuthLicense])      fakeValue = @"BYPASS-0000-0000-0000";
-        else if ([account isEqualToString:kAuthDevice])       fakeValue = @"FAKEDEVICE-YTKActivator";
-        else if ([account isEqualToString:kAuthExpires])      fakeValue = @"01-01-2030 12:00 AM";
-        else if ([account isEqualToString:kAuthSessionToken]) fakeValue = @"FAKETOKEN-YTKActivator";
-        else if ([account isEqualToString:kAuthTimestamp])    fakeValue = @"9999999999";
-        else                                                  fakeValue = @"1";
-
-        if (result) {
-            id returnType = dict[(__bridge id)kSecReturnData];
-            if ([returnType boolValue]) {
-                *result = CFBridgingRetain([fakeValue dataUsingEncoding:NSUTF8StringEncoding]);
-            } else {
-                *result = CFBridgingRetain(fakeValue);
-            }
-        }
-        return errSecSuccess;
-    }
-}
-
-static OSStatus hook_SecItemDelete(CFDictionaryRef query) {
-    @autoreleasepool {
-        if (!real_SecItemDelete) resolveRealSecItem();
-        NSDictionary *dict = (__bridge NSDictionary *)query;
-        NSString *service = dict[(__bridge id)kSecAttrService];
-        if ([service isEqualToString:kService]) return errSecSuccess;
-        return real_SecItemDelete(query);
-    }
-}
-
-static OSStatus hook_SecItemAdd(CFDictionaryRef attributes, CFTypeRef *result) {
-    @autoreleasepool {
-        if (!real_SecItemAdd) resolveRealSecItem();
-        NSDictionary *dict = (__bridge NSDictionary *)attributes;
-        NSString *service = dict[(__bridge id)kSecAttrService];
-        if ([service isEqualToString:kService]) {
-            if (result) *result = NULL;
-            return errSecSuccess;
-        }
-        return real_SecItemAdd(attributes, result);
-    }
-}
-
-DYLD_INTERPOSE(hook_SecItemCopyMatching, SecItemCopyMatching)
-DYLD_INTERPOSE(hook_SecItemDelete,        SecItemDelete)
-DYLD_INTERPOSE(hook_SecItemAdd,           SecItemAdd)
+static NSString *const kService     = @"me.ikghd.ytkplus.secure";
+static NSString *const kFakeLicense = @"ACTIVATED-0000-0000";
+static NSString *const kYTKVersion  = @"5.6.1";
 
 // ============================================================
 #pragma mark — ObjC swizzle helper
@@ -190,11 +48,15 @@ static void hook_presentVC(id self, SEL _cmd, id vc, BOOL animated, id completio
         NSString *message = alert.message ?: @"";
         if ([title containsString:@"license_verification"] ||
             [title containsString:@"verification_passed"] ||
+            [title containsString:@"YTKillerPlus"] ||
             [message containsString:@"Invalid key"] ||
             [message containsString:@"Invalid signature"] ||
             [message containsString:@"license_expired"] ||
-            [message containsString:@"License Options"]) {
-            LOG(@"Suppressed license alert");
+            [message containsString:@"License Options"] ||
+            [message containsString:@"team_verification"] ||
+            [message containsString:@"Service unavailable"] ||
+            [message containsString:@"Incompatible environment"] ||
+            [message containsString:@"incompatible environment"]) {
             return;
         }
     }
@@ -218,14 +80,13 @@ static void hook_openCheckLicense(id self, SEL _cmd) {
 }
 
 // ============================================================
-#pragma mark — Force settings cells to show "Active"
+#pragma mark — Force settings cells active
 // ============================================================
 static void forceCellActive(UITableViewCell *cell) {
     if (!cell) return;
     if ([cell.accessoryView isKindOfClass:[UISwitch class]]) {
-        UISwitch *sw = (UISwitch *)cell.accessoryView;
-        [sw setOn:YES animated:NO];
-        sw.enabled = YES;
+        [(UISwitch *)cell.accessoryView setOn:YES animated:NO];
+        ((UISwitch *)cell.accessoryView).enabled = YES;
     }
     NSMutableArray *queue = [NSMutableArray arrayWithObject:cell];
     while (queue.count > 0) {
@@ -270,16 +131,15 @@ static UITableViewCell *hook_cellForRow(id self, SEL _cmd, UITableView *tv, NSIn
 }
 
 // ============================================================
-#pragma mark — Keychain pre-seed
+#pragma mark — Keychain pre-seed (direct, no hooks)
 // ============================================================
 static void writeKeychainValue(NSString *account, NSString *value) {
-    resolveRealSecItem();
     NSDictionary *delQuery = @{
         (__bridge id)kSecClass:       (__bridge id)kSecClassGenericPassword,
         (__bridge id)kSecAttrService: kService,
         (__bridge id)kSecAttrAccount: account,
     };
-    real_SecItemDelete((__bridge CFDictionaryRef)delQuery);
+    SecItemDelete((__bridge CFDictionaryRef)delQuery);
     if (!value) return;
     NSDictionary *addQuery = @{
         (__bridge id)kSecClass:         (__bridge id)kSecClassGenericPassword,
@@ -288,130 +148,113 @@ static void writeKeychainValue(NSString *account, NSString *value) {
         (__bridge id)kSecValueData:     [value dataUsingEncoding:NSUTF8StringEncoding],
         (__bridge id)kSecAttrAccessible: (__bridge id)kSecAttrAccessibleAfterFirstUnlock,
     };
-    real_SecItemAdd((__bridge CFDictionaryRef)addQuery, NULL);
+    SecItemAdd((__bridge CFDictionaryRef)addQuery, NULL);
 }
 
 static void preseedKeychain(void) {
+    // Activation flags
     writeKeychainValue(@"Etmvdvihq chmhc rml", @"1");
-    writeKeychainValue(kEnabledStatus,    @"1");
-    writeKeychainValue(kActivationLogged, @"1");
-    writeKeychainValue(kStatsSent,        @"1");
-    writeKeychainValue(kAuthEmail,        @"activated@ytk.local");
-    writeKeychainValue(kAuthLicense,      @"ACTIVATED-0000-0000");
-    writeKeychainValue(kAuthDevice,       @"YTKActivator");
-    writeKeychainValue(kAuthExpires,      @"01-01-2030 12:00 AM");
-    writeKeychainValue(kAuthSessionToken, @"YTKActivator-Token");
-    writeKeychainValue(kAuthTimestamp,    @"9999999999");
-    writeKeychainValue(kAuthSeal,     nil); // DELETE — skips HMAC → bVar1=true
-    writeKeychainValue(kAuthLastSeal, nil); // DELETE
+    writeKeychainValue(@"Enabledytk_status",    @"1");
+    writeKeychainValue(@"auth_status_secure",   @"1");
+    writeKeychainValue(@"activation_logged",    @"1");
+    writeKeychainValue(@"stats_sent_before",    @"1");
 
-    // 5.6.1 additions: skip the server roundtrip that returns "Service unavailable"
-    // when activation_logged_for_key != auth_license_secure (decomp FUN_0003db08).
-    writeKeychainValue(kActivationLoggedForKey, @"ACTIVATED-0000-0000");
-    // Skip stats endpoint when lastStatsReportedVersion == current tweak version.
-    writeKeychainValue(kLastStatsVersion, kYTKVersion);
-    // Take the "already authenticated" branch in detectModification's caller.
-    writeKeychainValue(kAuthStatusSecure, @"1");
+    // License identity
+    writeKeychainValue(@"auth_email_secure",    @"activated@ytk.local");
+    writeKeychainValue(@"auth_license_secure",  kFakeLicense);
+    writeKeychainValue(@"auth_device_secure",   @"YTKActivator");
+    writeKeychainValue(@"auth_expires_secure",  @"01-01-2030 12:00 AM");
+    writeKeychainValue(@"auth_session_token",   @"YTKActivator-Token");
+    writeKeychainValue(@"auth_timestamp",       @"9999999999");
+
+    // 5.6.1 gate keys — skip activation + stats POST calls
+    // FUN_0003db08: activation network call only fires if license != activation_logged_for_key
+    // FUN_0003d334: stats network call only fires if lastStatsReportedVersion != current YTK version
+    writeKeychainValue(@"activation_logged_for_key", kFakeLicense);
+    writeKeychainValue(@"lastStatsReportedVersion",  kYTKVersion);
+
+    // Seal/timestamp keys must NOT exist (HMAC mismatch otherwise → server reject)
+    writeKeychainValue(@"auth_integrity_seal",       nil);
+    writeKeychainValue(@"auth_last_verified_seal",   nil);
+    writeKeychainValue(@"auth_last_verified_ts",     nil);
+    writeKeychainValue(@"ytk_last_contact_seal",     nil);
+    writeKeychainValue(@"ytk_last_contact_ts",       nil);
+    LOG(@"Keychain pre-seeded");
 }
 
 // ============================================================
-#pragma mark — First-launch welcome popup
+#pragma mark — Welcome popup
 // ============================================================
 static void showWelcomeIfNeeded(void) {
-    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    NSString *lastVersion = [defaults stringForKey:kVersionKey];
-
-    if ([lastVersion isEqualToString:kVersion]) return; // already shown
-
-    [defaults setObject:kVersion forKey:kVersionKey];
-    [defaults synchronize];
-
+    NSString *key = @"com.itzzace.ytkactivator.version";
+    NSString *ver = @"1.7";
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    if ([[d stringForKey:key] isEqualToString:ver]) return;
+    [d setObject:ver forKey:key];
+    [d synchronize];
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC),
                    dispatch_get_main_queue(), ^{
         UIAlertController *alert = [UIAlertController
             alertControllerWithTitle:@"YTKActivator"
-            message:@"YTKPlus has been activated.\n\nAll premium features are now enabled.\n\nMade by itzzace"
+            message:@"YTKPlus activation written.\n\nIf premium features don't work yet, force-close YouTube and reopen.\n\nMade by itzzace"
             preferredStyle:UIAlertControllerStyleAlert];
-        [alert addAction:[UIAlertAction actionWithTitle:@"OK"
-                          style:UIAlertActionStyleCancel handler:nil]];
-
+        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleCancel handler:nil]];
         UIWindowScene *ws = nil;
-        for (UIScene *s in [UIApplication sharedApplication].connectedScenes) {
+        for (UIScene *s in [UIApplication sharedApplication].connectedScenes)
             if ([s isKindOfClass:[UIWindowScene class]]) { ws = (UIWindowScene *)s; break; }
-        }
-        UIViewController *topVC = nil;
-        for (UIWindow *w in ws.windows) {
-            if (w.isKeyWindow) { topVC = w.rootViewController; break; }
-        }
-        while (topVC.presentedViewController) topVC = topVC.presentedViewController;
-        if (topVC) {
-            if (orig_presentVC) {
-                orig_presentVC(topVC, @selector(presentViewController:animated:completion:),
-                               alert, YES, nil);
-            } else {
-                [topVC presentViewController:alert animated:YES completion:nil];
-            }
+        UIViewController *top = nil;
+        for (UIWindow *w in ws.windows)
+            if (w.isKeyWindow) { top = w.rootViewController; break; }
+        while (top.presentedViewController) top = top.presentedViewController;
+        if (top) {
+            if (orig_presentVC) orig_presentVC(top, @selector(presentViewController:animated:completion:), alert, YES, nil);
+            else [top presentViewController:alert animated:YES completion:nil];
         }
     });
 }
 
 // ============================================================
-#pragma mark — Dyld image callback
+#pragma mark — Dyld callback
 // ============================================================
 static void dyld_callback(const struct mach_header *mh, intptr_t slide) {
-    @try {
-        Dl_info info;
-        if (!dladdr((const void *)mh, &info) || !info.dli_fname) return;
-        NSString *path = [NSString stringWithUTF8String:info.dli_fname];
-        if (![path containsString:@"YTKPlus"]) return;
+    Dl_info info;
+    if (!dladdr((const void *)mh, &info) || !info.dli_fname) return;
+    if (!strstr(info.dli_fname, "YTKPlus")) return;
 
-        ytkPlusFound = YES;
-        LOG(@"YTKPlus detected");
+    LOG(@"YTKPlus detected — re-preseeding for next launch");
+    preseedKeychain();
 
-        // fishhook: rewrite YTKPlus's GOT (belt-and-suspenders for post-init calls)
-        struct rebinding rebs[3] = {
-            { "SecItemCopyMatching", (void *)hook_SecItemCopyMatching, (void **)&_fh_orig_copy },
-            { "SecItemDelete",        (void *)hook_SecItemDelete,        (void **)&_fh_orig_delete },
-            { "SecItemAdd",           (void *)hook_SecItemAdd,           (void **)&_fh_orig_add },
-        };
-        rebind_symbols_image((void *)mh, slide, rebs, 3);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        Class dc = NSClassFromString(@"DownloadsController");
+        if (dc) {
+            IMP ign = NULL;
+            swizzleInstanceMethod(dc, NSSelectorFromString(@"settingsVerifyYkChecker:"),
+                                  (IMP)hook_settingsVerifyYkChecker, &ign);
+            swizzleInstanceMethod(dc, NSSelectorFromString(@"openCheckLicense"),
+                                  (IMP)hook_openCheckLicense, &ign);
+        }
+        Class dc2 = NSClassFromString(@"DownloadsController2");
+        if (dc2) {
+            IMP ign = NULL;
+            swizzleInstanceMethod(dc2, NSSelectorFromString(@"settingsVerifyYkChecker:"),
+                                  (IMP)hook_settingsVerifyYkChecker, &ign);
+            swizzleInstanceMethod(dc2, NSSelectorFromString(@"openCheckLicense"),
+                                  (IMP)hook_openCheckLicense, &ign);
+        }
+        Class roc = NSClassFromString(@"RootOptionsController");
+        if (roc) {
+            swizzleInstanceMethod(roc, NSSelectorFromString(@"configureEnabledCell:"),
+                                  (IMP)hook_configureEnabledCell, (IMP *)&orig_configureEnabledCell);
+            swizzleInstanceMethod(roc, @selector(tableView:cellForRowAtIndexPath:),
+                                  (IMP)hook_cellForRow, (IMP *)&orig_cellForRow);
+        }
 
-        // Wait for runtime classes, then install ObjC swizzles
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            // Settings page bypass
-            Class dc = NSClassFromString(@"DownloadsController");
-            if (dc) {
-                IMP ign = NULL;
-                swizzleInstanceMethod(dc, NSSelectorFromString(@"settingsVerifyYkChecker:"),
-                                      (IMP)hook_settingsVerifyYkChecker, &ign);
-                swizzleInstanceMethod(dc, NSSelectorFromString(@"openCheckLicense"),
-                                      (IMP)hook_openCheckLicense, &ign);
-            }
-            Class dc2 = NSClassFromString(@"DownloadsController2");
-            if (dc2) {
-                IMP ign = NULL;
-                swizzleInstanceMethod(dc2, NSSelectorFromString(@"settingsVerifyYkChecker:"),
-                                      (IMP)hook_settingsVerifyYkChecker, &ign);
-                swizzleInstanceMethod(dc2, NSSelectorFromString(@"openCheckLicense"),
-                                      (IMP)hook_openCheckLicense, &ign);
-            }
+        // Re-seed once more after YTK is settled
+        preseedKeychain();
 
-            // Force settings cells active
-            Class roc = NSClassFromString(@"RootOptionsController");
-            if (roc) {
-                swizzleInstanceMethod(roc, NSSelectorFromString(@"configureEnabledCell:"),
-                                      (IMP)hook_configureEnabledCell, (IMP *)&orig_configureEnabledCell);
-                swizzleInstanceMethod(roc, @selector(tableView:cellForRowAtIndexPath:),
-                                      (IMP)hook_cellForRow, (IMP *)&orig_cellForRow);
-            }
-
-            // Welcome popup (first launch only)
-            showWelcomeIfNeeded();
-        });
-    } @catch (NSException *e) {
-        LOG(@"dyld_callback exception: %@", e);
-    }
+        showWelcomeIfNeeded();
+    });
 }
 
 // ============================================================
@@ -419,28 +262,47 @@ static void dyld_callback(const struct mach_header *mh, intptr_t slide) {
 // ============================================================
 __attribute__((constructor))
 static void init(void) {
-    @try {
-        resolveRealSecItem();
+    preseedKeychain();
 
-        // Register dyld callback immediately (catches YTKPlus image load)
-        _dyld_register_func_for_add_image(dyld_callback);
+    swizzleInstanceMethod([UIViewController class],
+                          @selector(presentViewController:animated:completion:),
+                          (IMP)hook_presentVC, (IMP *)&orig_presentVC);
 
-        // Delay everything else by 5 seconds to let YTK finish initializing
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC),
+    _dyld_register_func_for_add_image(dyld_callback);
+
+    LOG(@"YTKActivator v1.7 loaded");
+
+    // First-launch auto-restart: show popup, then exit so next launch activates cleanly
+    NSString *flagKey = @"com.itzzace.ytkactivator.firstLaunchDone";
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    if (![d boolForKey:flagKey]) {
+        [d setBool:YES forKey:flagKey];
+        [d synchronize];
+        LOG(@"First launch — showing popup then exiting");
+
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
-            LOG(@"YTKActivator %@ starting (delayed init)", kVersion);
+            UIAlertController *alert = [UIAlertController
+                alertControllerWithTitle:@"YTKActivated"
+                message:@"Closing in 5 seconds...\n\nReopen YouTube after the app closes to activate all premium features."
+                preferredStyle:UIAlertControllerStyleAlert];
 
-            // Primary: write real keychain values
-            preseedKeychain();
+            UIWindowScene *ws = nil;
+            for (UIScene *s in [UIApplication sharedApplication].connectedScenes)
+                if ([s isKindOfClass:[UIWindowScene class]]) { ws = (UIWindowScene *)s; break; }
+            UIViewController *top = nil;
+            for (UIWindow *w in ws.windows)
+                if (w.isKeyWindow) { top = w.rootViewController; break; }
+            while (top.presentedViewController) top = top.presentedViewController;
+            if (top) {
+                if (orig_presentVC) orig_presentVC(top, @selector(presentViewController:animated:completion:), alert, YES, nil);
+                else [top presentViewController:alert animated:YES completion:nil];
+            }
 
-            // Alert suppression
-            swizzleInstanceMethod([UIViewController class],
-                                  @selector(presentViewController:animated:completion:),
-                                  (IMP)hook_presentVC, (IMP *)&orig_presentVC);
-
-            LOG(@"YTKActivator %@ ready", kVersion);
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                exit(0);
+            });
         });
-    } @catch (NSException *e) {
-        LOG(@"init exception: %@", e);
     }
 }
