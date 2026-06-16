@@ -1,17 +1,13 @@
 /*
- *  YTKHelper v2.1 — Force-fail seal verifier to disable banlist refetch
+ *  YTKHelper / YTKActivator v2.2 — preseed + credit popup
  *
- *  Discovery: YTKPlus 5.6.1 has buggy logic in its "should I refetch banlist"
- *  decider (FUN_3cbb8). When the seal verifier (FUN_44e94) returns 0 (failed),
- *  the XOR truth-table logic SKIPS the network refetch instead of forcing it.
+ *  Same v2.1 keychain logic (force-fail seal verifier, empty banlists)
+ *  + 5s delay credit popup on first launch saying "App is crashing,
+ *  please reopen when it crashes" then exits so launch 2 activates clean.
  *
- *  So we:
- *    1. Match YTK's exact keychain attributes (AfterFirstUnlockThisDeviceOnly +
- *       Synchronizable=NO) so our presed items collide with YTK's own writes
- *       instead of coexisting as phantom items
- *    2. Preseed garbage seals → verifier returns 0 → no banlist refetch ever
- *    3. Preseed empty banlists → name-of-dylib check finds nothing
- *    4. Same trick for auth_last_verified_seal → no activation refetch
+ *  Built twice via GitHub Actions:
+ *    - YTKHelper.dylib  (current safe name)
+ *    - YTKActivator.dylib (legacy name, in case you need the old one)
  *
  *  Made by itzzace
  */
@@ -34,7 +30,6 @@ static NSString *const kFutureTs    = @"9999999999.000";
 // Match YTK's attributes exactly (FUN_47440 in decomp):
 //   kSecAttrAccessible: AfterFirstUnlockThisDeviceOnly
 //   kSecAttrSynchronizable: NO
-// Otherwise our writes create phantom items YTK never reads.
 static void writeKeychainValue(NSString *account, NSString *value) {
     NSDictionary *delQuery = @{
         (__bridge id)kSecClass:       (__bridge id)kSecClassGenericPassword,
@@ -55,14 +50,14 @@ static void writeKeychainValue(NSString *account, NSString *value) {
 }
 
 static void preseedKeychain(void) {
-    // ---- Activation flags ----
+    // Activation flags
     writeKeychainValue(@"Etmvdvihq chmhc rml", @"1");
     writeKeychainValue(@"Enabledytk_status",    @"1");
     writeKeychainValue(@"auth_status_secure",   @"1");
     writeKeychainValue(@"activation_logged",    @"1");
     writeKeychainValue(@"stats_sent_before",    @"1");
 
-    // ---- Identity ----
+    // Identity
     writeKeychainValue(@"auth_email_secure",    @"activated@ytk.local");
     writeKeychainValue(@"auth_license_secure",  kFakeLicense);
     writeKeychainValue(@"auth_device_secure",   @"YTKHelper");
@@ -70,29 +65,52 @@ static void preseedKeychain(void) {
     writeKeychainValue(@"auth_session_token",   @"YTKHelper-Token");
     writeKeychainValue(@"auth_timestamp",       @"9999999999");
 
-    // ---- 5.6.1 gate keys: skip activation/stats POSTs ----
+    // 5.6.1 gate keys
     writeKeychainValue(@"activation_logged_for_key", kFakeLicense);
     writeKeychainValue(@"lastStatsReportedVersion",  kYTKVersion);
 
-    // ---- Empty banlists (defense in depth in case verifier passes anyway) ----
+    // Empty banlists
     writeKeychainValue(@"ytk_rc_cache",            @"{\"bannedUUIDs\":[],\"bannedDylibs\":[]}");
     writeKeychainValue(@"ytk_banned_uuids",        @"[]");
     writeKeychainValue(@"ytk_banned_dylib_names",  @"[]");
 
-    // ---- Force-fail the seal verifier (banlist refetch) ----
-    // FUN_3cbb8 logic: verifier returning 0 → XOR mismatch → SKIP refetch
+    // Force-fail seal verifier (banlist refetch)
     writeKeychainValue(@"ytk_last_contact_ts",   kFutureTs);
     writeKeychainValue(@"ytk_last_contact_seal", kJunkSeal);
 
-    // ---- Force-fail the seal verifier (activation refetch) ----
-    // Same FUN_472dc pattern at line 38933 → same buggy gate
+    // Force-fail seal verifier (activation refetch)
     writeKeychainValue(@"auth_last_verified_ts",   kFutureTs);
     writeKeychainValue(@"auth_last_verified_seal", kJunkSeal);
 
-    // ---- Clear integrity seal (no last-known-good for verifier to compare) ----
+    // Clear integrity seal
     writeKeychainValue(@"auth_integrity_seal", nil);
 
-    LOG(@"Keychain pre-seeded (v2.1: junk seals + empty banlists)");
+    LOG(@"Keychain pre-seeded (v2.2)");
+}
+
+// ============================================================
+#pragma mark — Credit popup
+// ============================================================
+static void showCreditPopupAndExit(void) {
+    UIAlertController *alert = [UIAlertController
+        alertControllerWithTitle:@"YTKActivated"
+        message:@"App is crashing — please reopen when it crashes.\n\nMade by itzzace"
+        preferredStyle:UIAlertControllerStyleAlert];
+
+    UIWindowScene *ws = nil;
+    for (UIScene *s in [UIApplication sharedApplication].connectedScenes)
+        if ([s isKindOfClass:[UIWindowScene class]]) { ws = (UIWindowScene *)s; break; }
+    UIViewController *top = nil;
+    for (UIWindow *w in ws.windows)
+        if (w.isKeyWindow) { top = w.rootViewController; break; }
+    while (top.presentedViewController) top = top.presentedViewController;
+    if (top) [top presentViewController:alert animated:YES completion:nil];
+
+    // Exit 5s after popup appears
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        exit(0);
+    });
 }
 
 // ============================================================
@@ -101,18 +119,19 @@ static void preseedKeychain(void) {
 __attribute__((constructor))
 static void init(void) {
     preseedKeychain();
-    LOG(@"YTKHelper v2.1 loaded — exploiting seal verifier XOR bug");
+    LOG(@"YTKHelper v2.2 loaded");
 
-    // First-launch: write keychain, then exit so YTK reads preseeded values next time
-    NSString *flagKey = @"com.itzzace.ytkhelper.firstLaunchDone.v21";
+    NSString *flagKey = @"com.itzzace.ytkhelper.firstLaunchDone.v22";
     NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
     if (![d boolForKey:flagKey]) {
         [d setBool:YES forKey:flagKey];
         [d synchronize];
-        LOG(@"First launch — exiting in 1s so next launch activates clean");
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+        LOG(@"First launch — showing credit popup, exiting in 5s");
+
+        // Wait 5s for UI to be ready, then show popup + exit
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
-            exit(0);
+            showCreditPopupAndExit();
         });
     }
 }

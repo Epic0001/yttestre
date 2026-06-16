@@ -1,4 +1,4 @@
-name: Build YTKHelper
+name: Build YTKHelper + YTKActivator
 
 on:
   push:
@@ -8,12 +8,45 @@ on:
 jobs:
   build:
     runs-on: macos-latest
+    strategy:
+      matrix:
+        variant: [YTKHelper, YTKActivator]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup Theos
         uses: beerpiss/theos-action@v1
+
+      - name: Patch Makefile + control for variant ${{ matrix.variant }}
+        run: |
+          NAME="${{ matrix.variant }}"
+          LOWER=$(echo "$NAME" | tr '[:upper:]' '[:lower:]')
+
+          # Rewrite Makefile with current variant name
+          sed -i.bak -E "s/^TWEAK_NAME = .*/TWEAK_NAME = $NAME/" Makefile
+          sed -i.bak -E "s/^[A-Za-z]+_FILES =/${NAME}_FILES =/" Makefile
+          sed -i.bak -E "s/^[A-Za-z]+_CFLAGS =/${NAME}_CFLAGS =/" Makefile
+          sed -i.bak -E "s/^[A-Za-z]+_FRAMEWORKS =/${NAME}_FRAMEWORKS =/" Makefile
+          rm -f Makefile.bak
+
+          # Rewrite control with current variant name
+          sed -i.bak -E "s/^Package: .*/Package: com.yourname.${LOWER}/" control
+          sed -i.bak -E "s/^Name: .*/Name: $NAME/" control
+          rm -f control.bak
+
+          # Rename plist file if different name exists
+          if [ -f "YTKHelper.plist" ] && [ "$NAME" != "YTKHelper" ]; then
+            cp YTKHelper.plist "${NAME}.plist"
+          fi
+          if [ -f "YTKActivator.plist" ] && [ "$NAME" != "YTKActivator" ]; then
+            cp YTKActivator.plist "${NAME}.plist"
+          fi
+
+          echo "=== Patched Makefile ==="
+          cat Makefile
+          echo "=== Patched control ==="
+          cat control
 
       - name: Build tweak
         run: |
@@ -23,39 +56,32 @@ jobs:
       - name: Locate built dylib
         id: locate
         run: |
-          DYLIB=$(find . -name 'YTKHelper.dylib' -path '*obj*' | head -n 1)
+          NAME="${{ matrix.variant }}"
+          DYLIB=$(find . -name "${NAME}.dylib" -path '*obj*' | head -n 1)
           echo "Found: $DYLIB"
           mkdir -p out
-          cp "$DYLIB" out/YTKHelper.dylib
-          echo "dylib_path=out/YTKHelper.dylib" >> $GITHUB_OUTPUT
+          cp "$DYLIB" "out/${NAME}.dylib"
+          echo "dylib_path=out/${NAME}.dylib" >> $GITHUB_OUTPUT
 
       - name: Fix install_name for IPA injection
         run: |
           DYLIB="${{ steps.locate.outputs.dylib_path }}"
-
           echo "=== Original load commands ==="
           otool -L "$DYLIB"
-
-          # macOS Theos build already uses @rpath/CydiaSubstrate.framework/CydiaSubstrate.
-          # Just add rpath search paths to ensure it's found in both bundle locations.
           install_name_tool -add_rpath @executable_path/Frameworks "$DYLIB" 2>/dev/null || true
           install_name_tool -add_rpath @loader_path "$DYLIB" 2>/dev/null || true
           install_name_tool -add_rpath @loader_path/.. "$DYLIB" 2>/dev/null || true
-
-          # Re-sign with ldid (Theos provides this)
           ldid -S "$DYLIB" 2>/dev/null || true
-
           echo "=== Patched load commands ==="
           otool -L "$DYLIB"
 
-      - name: Create both .deb and .dylib outputs
+      - name: Copy .deb output
         run: |
-          # Copy any .deb produced
           find packages -name "*.deb" -exec cp {} out/ \; 2>/dev/null || true
           ls -la out/
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: YTKHelper
+          name: ${{ matrix.variant }}
           path: out/*
