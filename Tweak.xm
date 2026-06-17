@@ -1,10 +1,9 @@
 /*
  *  YTKHelper / YTKActivator v2.8-alert-intercept
- *  YTKHelper / YTKActivator v3.1-gated-settings-open
+ *  YTKHelper / YTKActivator v3.2-first-gear-direct
  *
- *  v3.0 showed the scan is clean, but the real opener still returned after
- *  the trigger gate. This build seeds the final verified gate and integrity
- *  seal values directly before calling YTKPlus's opener.
+ *  v3.1 keeps the gated opener fallback. This build also overlays the first
+ *  YTKPlus gear button so the first tap opens tweak settings directly.
  *
  *  Made by itzzace
  */
@@ -26,6 +25,7 @@ static NSString *const kFakeLicense = @"ACTIVATED-0000-0000";
 static NSString *const kYTKVersion  = @"5.6.1";
 static NSString *const kJunkSeal    = @"INVALID-SEAL-FORCE-VERIFY-FAIL";
 static NSString *const kFutureTs    = @"9999999999.000";
+static NSInteger const kYTKDirectSettingsOverlayTag = 0x59544b31;
 
 static const uintptr_t kYTKPrepareSettingsGateOffset = 0x000b7f2c;
 static const uintptr_t kYTKOpenSettingsGatedOffset   = 0x000b8000;
@@ -347,12 +347,116 @@ static void ytk_openCheckLicense_replacement(id self, SEL _cmd) {
                    dispatch_get_main_queue(), ^{ ytk_openYTKSettingsViaGatedPath(self); });
 }
 
+static void ytk_firstSettingsButtonTapped(id self, SEL _cmd, id sender) {
+    ytk_log(@"first settings gear tapped on %@", NSStringFromClass([self class]));
+    ytk_openYTKSettingsViaGatedPath(self);
+}
+
+static UIButton *ytk_findFirstSettingsGearButton(UIViewController *vc) {
+    UIView *root = vc.view;
+    if (!root) return nil;
+
+    NSMutableArray<UIButton *> *buttons = [NSMutableArray array];
+    NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:root];
+    while (stack.count) {
+        UIView *view = stack.lastObject;
+        [stack removeLastObject];
+        for (UIView *subview in view.subviews) {
+            if (subview.tag == kYTKDirectSettingsOverlayTag) continue;
+            if ([subview isKindOfClass:[UIButton class]] && !subview.hidden && subview.alpha > 0.01) {
+                UIButton *button = (UIButton *)subview;
+                CGRect frameInRoot = [button.superview convertRect:button.frame toView:root];
+                CGFloat w = CGRectGetWidth(frameInRoot);
+                CGFloat h = CGRectGetHeight(frameInRoot);
+                if (w >= 20.0 && w <= 80.0 && h >= 20.0 && h <= 80.0) {
+                    [buttons addObject:button];
+                }
+            }
+            [stack addObject:subview];
+        }
+    }
+    if (!buttons.count) return nil;
+
+    [buttons sortUsingComparator:^NSComparisonResult(UIButton *a, UIButton *b) {
+        CGRect af = [a.superview convertRect:a.frame toView:root];
+        CGRect bf = [b.superview convertRect:b.frame toView:root];
+        CGFloat ay = CGRectGetMidY(af);
+        CGFloat by = CGRectGetMidY(bf);
+        if (fabs(ay - by) > 8.0) return ay < by ? NSOrderedAscending : NSOrderedDescending;
+        CGFloat ax = CGRectGetMinX(af);
+        CGFloat bx = CGRectGetMinX(bf);
+        return ax < bx ? NSOrderedAscending : (ax > bx ? NSOrderedDescending : NSOrderedSame);
+    }];
+
+    CGFloat topY = CGRectGetMidY([buttons.firstObject.superview convertRect:buttons.firstObject.frame toView:root]);
+    NSMutableArray<UIButton *> *row = [NSMutableArray array];
+    for (UIButton *button in buttons) {
+        CGRect frame = [button.superview convertRect:button.frame toView:root];
+        if (fabs(CGRectGetMidY(frame) - topY) <= 8.0) [row addObject:button];
+    }
+    if (!row.count) row = buttons;
+
+    [row sortUsingComparator:^NSComparisonResult(UIButton *a, UIButton *b) {
+        CGRect af = [a.superview convertRect:a.frame toView:root];
+        CGRect bf = [b.superview convertRect:b.frame toView:root];
+        CGFloat ax = CGRectGetMinX(af);
+        CGFloat bx = CGRectGetMinX(bf);
+        return ax < bx ? NSOrderedAscending : (ax > bx ? NSOrderedDescending : NSOrderedSame);
+    }];
+    return row.firstObject;
+}
+
+static void ytk_installFirstGearOverlay(id self) {
+    if (![self isKindOfClass:[UIViewController class]]) return;
+    UIViewController *vc = (UIViewController *)self;
+    UIView *root = vc.view;
+    if (!root) return;
+
+    UIView *old = [root viewWithTag:kYTKDirectSettingsOverlayTag];
+    [old removeFromSuperview];
+
+    UIButton *gear = ytk_findFirstSettingsGearButton(vc);
+    if (!gear) {
+        ytk_log(@"first gear overlay failed: no candidate on %@", NSStringFromClass([self class]));
+        return;
+    }
+
+    CGRect frame = [gear.superview convertRect:gear.frame toView:root];
+    UIButton *overlay = [UIButton buttonWithType:UIButtonTypeCustom];
+    overlay.tag = kYTKDirectSettingsOverlayTag;
+    overlay.frame = CGRectInset(frame, -6.0, -6.0);
+    overlay.backgroundColor = UIColor.clearColor;
+    [overlay addTarget:self action:@selector(ytk_firstSettingsButtonTapped:) forControlEvents:UIControlEventTouchUpInside];
+    [root addSubview:overlay];
+    ytk_log(@"first gear overlay installed frame=%@", NSStringFromCGRect(overlay.frame));
+}
+
+static void (*orig_setupSettingsButton)(id, SEL) = NULL;
+static void ytk_setupSettingsButton_hook(id self, SEL _cmd) {
+    if (orig_setupSettingsButton) orig_setupSettingsButton(self, _cmd);
+    dispatch_async(dispatch_get_main_queue(), ^{ ytk_installFirstGearOverlay(self); });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ ytk_installFirstGearOverlay(self); });
+}
+
 static BOOL ytk_swizzleClassNamed(NSString *className) {
     Class cls = NSClassFromString(className);
     if (!cls) return NO;
+    class_addMethod(cls, @selector(ytk_firstSettingsButtonTapped:), (IMP)ytk_firstSettingsButtonTapped, "v@:@");
+
+    SEL setupSel = sel_registerName("setupSettingsButton");
+    Method setupMethod = class_getInstanceMethod(cls, setupSel);
+    if (setupMethod) {
+        IMP cur = method_getImplementation(setupMethod);
+        if (cur != (IMP)ytk_setupSettingsButton_hook) {
+            orig_setupSettingsButton = (void (*)(id, SEL))method_setImplementation(setupMethod, (IMP)ytk_setupSettingsButton_hook);
+            ytk_log(@"swizzled %@ setupSettingsButton", className);
+        }
+    }
+
     SEL sel = sel_registerName("openCheckLicense");
     Method m = class_getInstanceMethod(cls, sel);
-    if (!m) return NO;
+    if (!m) return setupMethod != nil;
     IMP cur = method_getImplementation(m);
     if (cur == (IMP)ytk_openCheckLicense_replacement) return YES;
     method_setImplementation(m, (IMP)ytk_openCheckLicense_replacement);
@@ -386,7 +490,7 @@ static void ytk_retrySwizzle(int attempt) {
 __attribute__((constructor))
 static void init(void) {
     [[NSFileManager defaultManager] removeItemAtPath:ytk_logPath() error:nil];
-    ytk_log(@"boot v3.1-gated-settings-open constructor entered");
+    ytk_log(@"boot v3.2-first-gear-direct constructor entered");
 
     preseedKeychain();
     ytk_log(@"preseed done");
