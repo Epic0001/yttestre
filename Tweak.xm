@@ -1,9 +1,10 @@
 /*
  *  YTKHelper / YTKActivator v2.8-alert-intercept
- *  YTKHelper / YTKActivator v3.5-long-press-cleaner
+ *  YTKHelper / YTKActivator v3.6-launch-reseed
  *
- *  v3.4 restored the one-time credit popup. This build mimics the original
- *  first gear long-press cleaner menu on the direct-open overlay.
+ *  v3.5 restored the first gear long-press cleaner menu. This build reseeds
+ *  activation state through early launch/app-active timing to reduce rare
+ *  launches where YTKPlus caches inactive state before reading keychain.
  *
  *  Made by itzzace
  */
@@ -118,6 +119,51 @@ static void preseedKeychain(void) {
     writeKeychainValue(@"auth_last_verified_ts",   kFutureTs);
     writeKeychainValue(@"auth_last_verified_seal", kJunkSeal);
     writeKeychainValue(@"auth_integrity_seal",     nil);
+}
+
+static void preseedLaunchActivationState(NSString *reason) {
+    writeKeychainValue(@"Etmvdvihq chmhc rml", @"1");
+    writeKeychainValue(@"Enabledytk_status",    @"1");
+    writeKeychainValue(@"auth_status_secure",   @"1");
+    writeKeychainValue(@"activation_logged",    @"1");
+    writeKeychainValue(@"stats_sent_before",    @"1");
+
+    writeKeychainValue(@"auth_email_secure",    @"activated@ytk.local");
+    writeKeychainValue(@"auth_license_secure",  kFakeLicense);
+    writeKeychainValue(@"auth_device_secure",   @"YTKHelper");
+    writeKeychainValue(@"auth_expires_secure",  @"01-01-2030 12:00 AM");
+    writeKeychainValue(@"auth_session_token",   @"YTKHelper-Token");
+    writeKeychainValue(@"auth_timestamp",       @"9999999999");
+
+    writeKeychainValue(@"activation_logged_for_key", kFakeLicense);
+    writeKeychainValue(@"lastStatsReportedVersion",  kYTKVersion);
+
+    writeKeychainValue(@"ytk_rc_cache",            @"{\"bannedUUIDs\":[],\"bannedDylibs\":[]}");
+    writeKeychainValue(@"ytk_banned_uuids",        @"[]");
+    writeKeychainValue(@"ytk_banned_dylib_names",  @"[]");
+
+    writeKeychainValue(@"ytk_last_contact_ts",     kFutureTs);
+    writeKeychainValue(@"ytk_last_contact_seal",   kJunkSeal);
+    writeKeychainValue(@"auth_last_verified_ts",   kFutureTs);
+    writeKeychainValue(@"auth_last_verified_seal", kJunkSeal);
+    ytk_log(@"launch activation state reseeded: %@", reason);
+}
+
+static void scheduleLaunchReseeds(void) {
+    NSArray<NSNumber *> *delays = @[ @0.25, @1.0, @3.0, @8.0 ];
+    for (NSNumber *delay in delays) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay.doubleValue * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            preseedLaunchActivationState([NSString stringWithFormat:@"launch +%.2fs", delay.doubleValue]);
+        });
+    }
+
+    [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification
+                                                      object:nil
+                                                       queue:[NSOperationQueue mainQueue]
+                                                  usingBlock:^(__unused NSNotification *note) {
+        preseedLaunchActivationState(@"app became active");
+    }];
 }
 
 static UIViewController *ytk_topVC(void) {
@@ -650,10 +696,11 @@ static void ytk_retrySwizzle(int attempt) {
 __attribute__((constructor))
 static void init(void) {
     [[NSFileManager defaultManager] removeItemAtPath:ytk_logPath() error:nil];
-    ytk_log(@"boot v3.5-long-press-cleaner constructor entered");
+    ytk_log(@"boot v3.6-launch-reseed constructor entered");
 
     preseedKeychain();
     ytk_log(@"preseed done");
+    scheduleLaunchReseeds();
 
     ytk_installPresentInterceptor();
     ytk_showCreditPopupIfNeeded();
