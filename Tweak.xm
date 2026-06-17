@@ -1,9 +1,10 @@
 /*
  *  YTKHelper / YTKActivator v2.8-alert-intercept
- *  YTKHelper / YTKActivator v3.2-first-gear-direct
+ *  YTKHelper / YTKActivator v3.3-portrait-gear-and-active-ui
  *
- *  v3.1 keeps the gated opener fallback. This build also overlays the first
- *  YTKPlus gear button so the first tap opens tweak settings directly.
+ *  v3.2 made the first gear direct-open. This build keeps that overlay aligned
+ *  after portrait/landscape layout changes, and forces the root settings page
+ *  to display enabled/active status.
  *
  *  Made by itzzace
  */
@@ -352,27 +353,39 @@ static void ytk_firstSettingsButtonTapped(id self, SEL _cmd, id sender) {
     ytk_openYTKSettingsViaGatedPath(self);
 }
 
-static UIButton *ytk_findFirstSettingsGearButton(UIViewController *vc) {
-    UIView *root = vc.view;
-    if (!root) return nil;
+static void ytk_installFirstGearOverlay(id self);
 
-    NSMutableArray<UIButton *> *buttons = [NSMutableArray array];
+static NSArray<UIView *> *ytk_allSubviews(UIView *root) {
+    if (!root) return @[];
+    NSMutableArray<UIView *> *views = [NSMutableArray array];
     NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:root];
     while (stack.count) {
         UIView *view = stack.lastObject;
         [stack removeLastObject];
         for (UIView *subview in view.subviews) {
-            if (subview.tag == kYTKDirectSettingsOverlayTag) continue;
-            if ([subview isKindOfClass:[UIButton class]] && !subview.hidden && subview.alpha > 0.01) {
-                UIButton *button = (UIButton *)subview;
-                CGRect frameInRoot = [button.superview convertRect:button.frame toView:root];
-                CGFloat w = CGRectGetWidth(frameInRoot);
-                CGFloat h = CGRectGetHeight(frameInRoot);
-                if (w >= 20.0 && w <= 80.0 && h >= 20.0 && h <= 80.0) {
-                    [buttons addObject:button];
-                }
-            }
+            [views addObject:subview];
             [stack addObject:subview];
+        }
+    }
+    return views;
+}
+
+static UIButton *ytk_findFirstSettingsGearButton(UIViewController *vc) {
+    UIView *root = vc.view;
+    if (!root) return nil;
+
+    NSMutableArray<UIButton *> *buttons = [NSMutableArray array];
+    for (UIView *subview in ytk_allSubviews(root)) {
+        if (subview.tag == kYTKDirectSettingsOverlayTag) continue;
+        if ([subview isKindOfClass:[UIButton class]] && !subview.hidden && subview.alpha > 0.01) {
+            UIButton *button = (UIButton *)subview;
+            CGRect frameInRoot = [button.superview convertRect:button.frame toView:root];
+            CGFloat w = CGRectGetWidth(frameInRoot);
+            CGFloat h = CGRectGetHeight(frameInRoot);
+            if (w >= 20.0 && w <= 80.0 && h >= 20.0 && h <= 80.0 &&
+                CGRectGetMinX(frameInRoot) > CGRectGetMidX(root.bounds) * 0.75) {
+                [buttons addObject:button];
+            }
         }
     }
     if (!buttons.count) return nil;
@@ -406,6 +419,10 @@ static UIButton *ytk_findFirstSettingsGearButton(UIViewController *vc) {
     return row.firstObject;
 }
 
+static void ytk_refreshFirstGearOverlay(id self) {
+    dispatch_async(dispatch_get_main_queue(), ^{ ytk_installFirstGearOverlay(self); });
+}
+
 static void ytk_installFirstGearOverlay(id self) {
     if (![self isKindOfClass:[UIViewController class]]) return;
     UIViewController *vc = (UIViewController *)self;
@@ -434,9 +451,81 @@ static void ytk_installFirstGearOverlay(id self) {
 static void (*orig_setupSettingsButton)(id, SEL) = NULL;
 static void ytk_setupSettingsButton_hook(id self, SEL _cmd) {
     if (orig_setupSettingsButton) orig_setupSettingsButton(self, _cmd);
-    dispatch_async(dispatch_get_main_queue(), ^{ ytk_installFirstGearOverlay(self); });
+    ytk_refreshFirstGearOverlay(self);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{ ytk_installFirstGearOverlay(self); });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ ytk_installFirstGearOverlay(self); });
+}
+
+static void (*orig_downloadsViewDidLayoutSubviews)(id, SEL) = NULL;
+static void ytk_downloadsViewDidLayoutSubviews_hook(id self, SEL _cmd) {
+    if (orig_downloadsViewDidLayoutSubviews) orig_downloadsViewDidLayoutSubviews(self, _cmd);
+    ytk_installFirstGearOverlay(self);
+}
+
+static void ytk_applyRootOptionsVisuals(id self) {
+    if (![self isKindOfClass:[UIViewController class]]) return;
+    UIViewController *vc = (UIViewController *)self;
+    int labels = 0;
+    int switches = 0;
+
+    for (UIView *view in ytk_allSubviews(vc.view)) {
+        if ([view isKindOfClass:[UILabel class]]) {
+            UILabel *label = (UILabel *)view;
+            NSString *text = label.text ?: @"";
+            NSString *lower = text.lowercaseString;
+            if ([lower containsString:@"inactive"] || [lower containsString:@"verify license"]) {
+                label.text = @"Active (itzzace.)";
+                label.textColor = [UIColor systemGreenColor];
+                labels++;
+            }
+        } else if ([view isKindOfClass:[UISwitch class]]) {
+            UISwitch *sw = (UISwitch *)view;
+            if (!sw.isOn) [sw setOn:YES animated:NO];
+            switches++;
+        }
+    }
+    ytk_log(@"root options visuals applied labels=%d switches=%d", labels, switches);
+}
+
+static void (*orig_rootViewDidAppear)(id, SEL, BOOL) = NULL;
+static void ytk_rootViewDidAppear_hook(id self, SEL _cmd, BOOL animated) {
+    if (orig_rootViewDidAppear) orig_rootViewDidAppear(self, _cmd, animated);
+    ytk_applyRootOptionsVisuals(self);
+}
+
+static void (*orig_rootViewDidLayoutSubviews)(id, SEL) = NULL;
+static void ytk_rootViewDidLayoutSubviews_hook(id self, SEL _cmd) {
+    if (orig_rootViewDidLayoutSubviews) orig_rootViewDidLayoutSubviews(self, _cmd);
+    ytk_applyRootOptionsVisuals(self);
+}
+
+static void ytk_swizzleRootOptionsController(void) {
+    Class cls = NSClassFromString(@"RootOptionsController");
+    if (!cls) return;
+
+    SEL appearSel = @selector(viewDidAppear:);
+    IMP currentAppear = class_getMethodImplementation(cls, appearSel);
+    if (currentAppear != (IMP)ytk_rootViewDidAppear_hook) {
+        orig_rootViewDidAppear = (void (*)(id, SEL, BOOL))currentAppear;
+        if (!class_addMethod(cls, appearSel, (IMP)ytk_rootViewDidAppear_hook, "v@:B")) {
+            Method appear = class_getInstanceMethod(cls, appearSel);
+            orig_rootViewDidAppear = (void (*)(id, SEL, BOOL))method_setImplementation(appear, (IMP)ytk_rootViewDidAppear_hook);
+        }
+        ytk_log(@"swizzled RootOptionsController viewDidAppear");
+    }
+
+    SEL layoutSel = @selector(viewDidLayoutSubviews);
+    IMP currentLayout = class_getMethodImplementation(cls, layoutSel);
+    if (currentLayout != (IMP)ytk_rootViewDidLayoutSubviews_hook) {
+        orig_rootViewDidLayoutSubviews = (void (*)(id, SEL))currentLayout;
+        if (!class_addMethod(cls, layoutSel, (IMP)ytk_rootViewDidLayoutSubviews_hook, "v@:")) {
+            Method layout = class_getInstanceMethod(cls, layoutSel);
+            orig_rootViewDidLayoutSubviews = (void (*)(id, SEL))method_setImplementation(layout, (IMP)ytk_rootViewDidLayoutSubviews_hook);
+        }
+        ytk_log(@"swizzled RootOptionsController viewDidLayoutSubviews");
+    }
 }
 
 static BOOL ytk_swizzleClassNamed(NSString *className) {
@@ -451,6 +540,17 @@ static BOOL ytk_swizzleClassNamed(NSString *className) {
         if (cur != (IMP)ytk_setupSettingsButton_hook) {
             orig_setupSettingsButton = (void (*)(id, SEL))method_setImplementation(setupMethod, (IMP)ytk_setupSettingsButton_hook);
             ytk_log(@"swizzled %@ setupSettingsButton", className);
+        }
+
+        SEL layoutSel = @selector(viewDidLayoutSubviews);
+        IMP currentLayout = class_getMethodImplementation(cls, layoutSel);
+        if (currentLayout != (IMP)ytk_downloadsViewDidLayoutSubviews_hook) {
+            orig_downloadsViewDidLayoutSubviews = (void (*)(id, SEL))currentLayout;
+            if (!class_addMethod(cls, layoutSel, (IMP)ytk_downloadsViewDidLayoutSubviews_hook, "v@:")) {
+                Method layout = class_getInstanceMethod(cls, layoutSel);
+                orig_downloadsViewDidLayoutSubviews = (void (*)(id, SEL))method_setImplementation(layout, (IMP)ytk_downloadsViewDidLayoutSubviews_hook);
+            }
+            ytk_log(@"swizzled %@ viewDidLayoutSubviews", className);
         }
     }
 
@@ -481,6 +581,7 @@ static BOOL ytk_swizzleKnownClasses(void) {
 static void ytk_retrySwizzle(int attempt) {
     BOOL any = ytk_swizzleKnownClasses();
     BOOL roc = (NSClassFromString(@"RootOptionsController") != nil);
+    if (roc) ytk_swizzleRootOptionsController();
     ytk_log(@"retry %d swizzle any=%@ ROC=%@", attempt, any ? @"YES" : @"NO", roc ? @"YES" : @"NO");
     if (any || attempt >= 30) return;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
@@ -490,7 +591,7 @@ static void ytk_retrySwizzle(int attempt) {
 __attribute__((constructor))
 static void init(void) {
     [[NSFileManager defaultManager] removeItemAtPath:ytk_logPath() error:nil];
-    ytk_log(@"boot v3.2-first-gear-direct constructor entered");
+    ytk_log(@"boot v3.3-portrait-gear-and-active-ui constructor entered");
 
     preseedKeychain();
     ytk_log(@"preseed done");
