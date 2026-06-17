@@ -1,10 +1,11 @@
 /*
  *  YTKHelper / YTKActivator v2.8-alert-intercept
- *  YTKHelper / YTKActivator v2.9-gated-settings-open
+ *  YTKHelper / YTKActivator v3.0-gated-settings-open
  *
- *  v2.8 proved the License Options alert can be intercepted, but directly
- *  constructing RootOptionsController skips YTKPlus's private gate/auth setup.
- *  This build intercepts the alert and calls YTKPlus's own gated success path.
+ *  v2.9 reached YTKPlus's real opener, but it silently returned because its
+ *  hidden activation gate key was missing. This build asks YTKPlus for that
+ *  private key/hash, seeds the gate, logs the clean-scan result, then calls
+ *  the real gated opener.
  *
  *  Made by itzzace
  */
@@ -29,6 +30,11 @@ static NSString *const kFutureTs    = @"9999999999.000";
 
 static const uintptr_t kYTKPrepareSettingsGateOffset = 0x000b7f2c;
 static const uintptr_t kYTKOpenSettingsGatedOffset   = 0x000b8000;
+static const uintptr_t kYTKReadKeychainOffset        = 0x000b7cd4;
+static const uintptr_t kYTKHMACOffset                = 0x000b8840;
+static const uintptr_t kYTKSecretOffset              = 0x000b8bbc;
+static const uintptr_t kYTKPrivateGateAccountOffset  = 0x000b8dd8;
+static const uintptr_t kYTKCleanScanOffset           = 0x000b9128;
 
 static NSString *ytk_logPath(void) {
     return [NSTemporaryDirectory() stringByAppendingPathComponent:@"YTKHelper-debug.log"];
@@ -65,6 +71,24 @@ static void writeKeychainValue(NSString *account, NSString *value) {
         (__bridge id)kSecAttrSynchronizable: @NO,
     };
     SecItemAdd((__bridge CFDictionaryRef)addQuery, NULL);
+}
+
+static NSString *readKeychainValue(NSString *account) {
+    if (!account) return nil;
+    NSDictionary *query = @{
+        (__bridge id)kSecClass:           (__bridge id)kSecClassGenericPassword,
+        (__bridge id)kSecAttrService:     kService,
+        (__bridge id)kSecAttrAccount:     account,
+        (__bridge id)kSecReturnData:      @YES,
+        (__bridge id)kSecMatchLimit:      (__bridge id)kSecMatchLimitOne,
+        (__bridge id)kSecAttrSynchronizable: @NO,
+    };
+    CFTypeRef result = NULL;
+    OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, &result);
+    if (status != errSecSuccess || !result) return nil;
+    NSData *data = CFBridgingRelease(result);
+    if (![data isKindOfClass:[NSData class]]) return nil;
+    return [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
 }
 
 static void preseedKeychain(void) {
@@ -138,6 +162,66 @@ static void *ytk_authFunctionPointer(void *ptr) {
 #endif
 }
 
+static NSString *ytk_callStringFunction(uintptr_t offset, NSString *name) {
+    void *ptr = ytk_findYTKPlusAddress(offset);
+    if (!ptr) {
+        ytk_log(@"private %@ missing at offset 0x%lx", name, (unsigned long)offset);
+        return nil;
+    }
+    typedef id (*YTKStringFn)(void);
+    YTKStringFn fn = (YTKStringFn)ytk_authFunctionPointer(ptr);
+    id value = fn();
+    if (value && ![value isKindOfClass:[NSString class]]) {
+        ytk_log(@"private %@ returned non-string %@", name, NSStringFromClass([value class]));
+        return nil;
+    }
+    return value;
+}
+
+static NSString *ytk_callHMAC(NSString *data, NSString *key) {
+    void *ptr = ytk_findYTKPlusAddress(kYTKHMACOffset);
+    if (!ptr || !data || !key) return nil;
+    typedef id (*YTKHMACFn)(id, id);
+    YTKHMACFn fn = (YTKHMACFn)ytk_authFunctionPointer(ptr);
+    id value = fn(data, key);
+    if (value && ![value isKindOfClass:[NSString class]]) return nil;
+    return value;
+}
+
+static NSString *ytk_callYTKRead(NSString *account) {
+    void *ptr = ytk_findYTKPlusAddress(kYTKReadKeychainOffset);
+    if (!ptr || !account) return nil;
+    typedef id (*YTKReadFn)(id);
+    YTKReadFn fn = (YTKReadFn)ytk_authFunctionPointer(ptr);
+    id value = fn(account);
+    if (value && ![value isKindOfClass:[NSString class]]) return nil;
+    return value;
+}
+
+static void ytk_seedPrivateActivationGate(void) {
+    NSString *account = ytk_callStringFunction(kYTKPrivateGateAccountOffset, @"gateAccount");
+    NSString *secret = ytk_callStringFunction(kYTKSecretOffset, @"secret");
+    NSString *clean = ytk_callStringFunction(kYTKCleanScanOffset, @"cleanScan");
+    NSString *existing = account ? readKeychainValue(account) : nil;
+    NSString *ytkExisting = account ? ytk_callYTKRead(account) : nil;
+
+    NSString *fullHash = ytk_callHMAC(secret, secret);
+    NSString *shortHash = fullHash.length >= 8 ? [fullHash substringToIndex:8] : fullHash;
+
+    ytk_log(@"gate diag account=%@ existing=%@ ytkExisting=%@ shortHash=%@ clean=%@",
+            account ?: @"nil",
+            existing ?: @"nil",
+            ytkExisting ?: @"nil",
+            shortHash ?: @"nil",
+            clean ?: @"nil");
+
+    if (account.length) {
+        writeKeychainValue(account, @"1");
+        NSString *after = readKeychainValue(account);
+        ytk_log(@"gate seeded %@ -> %@", account, after ?: @"nil");
+    }
+}
+
 static void ytk_openYTKSettingsViaGatedPath(id self) {
     if (![self isKindOfClass:[UIViewController class]]) {
         UIViewController *top = ytk_topVC();
@@ -165,6 +249,7 @@ static void ytk_openYTKSettingsViaGatedPath(id self) {
 
     ytk_log(@"gated open calling prepare=%p open=%p host=%@",
             preparePtr, openPtr, NSStringFromClass([self class]));
+    ytk_seedPrivateActivationGate();
     prepareGate();
     openSettings(self);
     ytk_log(@"gated open returned from YTKPlus opener");
@@ -273,7 +358,7 @@ static void ytk_retrySwizzle(int attempt) {
 __attribute__((constructor))
 static void init(void) {
     [[NSFileManager defaultManager] removeItemAtPath:ytk_logPath() error:nil];
-    ytk_log(@"boot v2.9-gated-settings-open constructor entered");
+    ytk_log(@"boot v3.0-gated-settings-open constructor entered");
 
     preseedKeychain();
     ytk_log(@"preseed done");
