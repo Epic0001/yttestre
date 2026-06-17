@@ -1,11 +1,10 @@
 /*
  *  YTKHelper / YTKActivator v2.8-alert-intercept
- *  YTKHelper / YTKActivator v3.0-gated-settings-open
+ *  YTKHelper / YTKActivator v3.1-gated-settings-open
  *
- *  v2.9 reached YTKPlus's real opener, but it silently returned because its
- *  hidden activation gate key was missing. This build asks YTKPlus for that
- *  private key/hash, seeds the gate, logs the clean-scan result, then calls
- *  the real gated opener.
+ *  v3.0 showed the scan is clean, but the real opener still returned after
+ *  the trigger gate. This build seeds the final verified gate and integrity
+ *  seal values directly before calling YTKPlus's opener.
  *
  *  Made by itzzace
  */
@@ -34,6 +33,7 @@ static const uintptr_t kYTKReadKeychainOffset        = 0x000b7cd4;
 static const uintptr_t kYTKHMACOffset                = 0x000b8840;
 static const uintptr_t kYTKSecretOffset              = 0x000b8bbc;
 static const uintptr_t kYTKPrivateGateAccountOffset  = 0x000b8dd8;
+static const uintptr_t kYTKWriteKeychainOffset       = 0x000b8f84;
 static const uintptr_t kYTKCleanScanOffset           = 0x000b9128;
 
 static NSString *ytk_logPath(void) {
@@ -198,27 +198,55 @@ static NSString *ytk_callYTKRead(NSString *account) {
     return value;
 }
 
+static void ytk_callYTKWrite(NSString *account, NSString *value) {
+    void *ptr = ytk_findYTKPlusAddress(kYTKWriteKeychainOffset);
+    if (!ptr || !account || !value) return;
+    typedef void (*YTKWriteFn)(id, id);
+    YTKWriteFn fn = (YTKWriteFn)ytk_authFunctionPointer(ptr);
+    fn(account, value);
+}
+
 static void ytk_seedPrivateActivationGate(void) {
     NSString *account = ytk_callStringFunction(kYTKPrivateGateAccountOffset, @"gateAccount");
     NSString *secret = ytk_callStringFunction(kYTKSecretOffset, @"secret");
     NSString *clean = ytk_callStringFunction(kYTKCleanScanOffset, @"cleanScan");
     NSString *existing = account ? readKeychainValue(account) : nil;
     NSString *ytkExisting = account ? ytk_callYTKRead(account) : nil;
+    NSString *device = readKeychainValue(@"auth_device_secure") ?: ytk_callYTKRead(@"auth_device_secure") ?: @"YTKHelper";
 
     NSString *fullHash = ytk_callHMAC(secret, secret);
     NSString *shortHash = fullHash.length >= 8 ? [fullHash substringToIndex:8] : fullHash;
+    NSString *sealInput = (shortHash.length && device.length) ? [shortHash stringByAppendingString:device] : nil;
+    NSString *integritySeal = sealInput ? ytk_callHMAC(sealInput, secret) : nil;
 
-    ytk_log(@"gate diag account=%@ existing=%@ ytkExisting=%@ shortHash=%@ clean=%@",
+    ytk_log(@"gate diag account=%@ existing=%@ ytkExisting=%@ device=%@ shortHash=%@ seal=%@ clean=%@",
             account ?: @"nil",
             existing ?: @"nil",
             ytkExisting ?: @"nil",
+            device ?: @"nil",
             shortHash ?: @"nil",
+            integritySeal ?: @"nil",
             clean ?: @"nil");
 
-    if (account.length) {
-        writeKeychainValue(account, @"1");
-        NSString *after = readKeychainValue(account);
-        ytk_log(@"gate seeded %@ -> %@", account, after ?: @"nil");
+    if (account.length && shortHash.length) {
+        writeKeychainValue(@"auth_device_secure", device);
+        writeKeychainValue(account, shortHash);
+        ytk_callYTKWrite(account, shortHash);
+        if (integritySeal.length) {
+            writeKeychainValue(@"auth_integrity_seal", integritySeal);
+            ytk_callYTKWrite(@"auth_integrity_seal", integritySeal);
+        }
+
+        NSString *gateAfter = readKeychainValue(account);
+        NSString *ytkGateAfter = ytk_callYTKRead(account);
+        NSString *sealAfter = readKeychainValue(@"auth_integrity_seal");
+        NSString *ytkSealAfter = ytk_callYTKRead(@"auth_integrity_seal");
+        ytk_log(@"gate seeded %@ local=%@ ytk=%@ integrity local=%@ ytk=%@",
+                account,
+                gateAfter ?: @"nil",
+                ytkGateAfter ?: @"nil",
+                sealAfter ?: @"nil",
+                ytkSealAfter ?: @"nil");
     }
 }
 
@@ -358,7 +386,7 @@ static void ytk_retrySwizzle(int attempt) {
 __attribute__((constructor))
 static void init(void) {
     [[NSFileManager defaultManager] removeItemAtPath:ytk_logPath() error:nil];
-    ytk_log(@"boot v3.0-gated-settings-open constructor entered");
+    ytk_log(@"boot v3.1-gated-settings-open constructor entered");
 
     preseedKeychain();
     ytk_log(@"preseed done");
