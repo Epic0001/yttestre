@@ -1,10 +1,9 @@
 /*
- *  YTKHelper / YTKActivator v2.7-watchdog-fix
+ *  YTKHelper / YTKActivator v2.8-alert-intercept
  *
  *  v2.6 hung on launch because runtime-wide objc_copyClassList scanning during
  *  early dyld/class registration can burn the whole 20s process-launch budget.
- *  This build removes global class scans and dyld callbacks. It only attempts
- *  targeted swizzles on known YTKPlus controller classes, spread over time.
+ *  This build keeps targeted swizzle retries, and also intercepts the actual License Options UIAlertController presentation. If the hidden openCheckLicense class cannot be found, the alert interceptor replaces that popup with RootOptionsController.
  *
  *  Made by itzzace
  */
@@ -132,6 +131,64 @@ static void ytk_presentRootOptions(id self) {
     }];
 }
 
+
+static void (*orig_presentViewController)(id, SEL, UIViewController *, BOOL, void (^)(void)) = NULL;
+static _Thread_local int gPresentDepth = 0;
+
+static BOOL ytk_isLicenseOptionsAlert(UIViewController *vc) {
+    if (![vc isKindOfClass:[UIAlertController class]]) return NO;
+    UIAlertController *alert = (UIAlertController *)vc;
+    NSString *title = (alert.title ?: @"").lowercaseString;
+    NSString *message = (alert.message ?: @"").lowercaseString;
+    NSMutableString *actions = [NSMutableString string];
+    for (UIAlertAction *action in alert.actions) {
+        [actions appendFormat:@"%@\n", (action.title ?: @"").lowercaseString];
+    }
+    NSString *haystack = [NSString stringWithFormat:@"%@\n%@\n%@", title, message, actions];
+    return [haystack containsString:@"license options"] ||
+           [haystack containsString:@"license option"] ||
+           [haystack containsString:@"choose an option"] ||
+           [haystack containsString:@"activate new license"] ||
+           [haystack containsString:@"restore license"] ||
+           [haystack containsString:@"renew license"] ||
+           [haystack containsString:@"buy license"] ||
+           [haystack containsString:@"license_option"] ||
+           [haystack containsString:@"activate_new_license"] ||
+           [haystack containsString:@"restore_license"] ||
+           [haystack containsString:@"renew_license"] ||
+           [haystack containsString:@"buy_license"];
+}
+
+static void ytk_presentViewController_hook(id self, SEL _cmd, UIViewController *vc, BOOL animated, void (^completion)(void)) {
+    if (gPresentDepth == 0 && ytk_isLicenseOptionsAlert(vc)) {
+        ytk_log(@"intercepted License Options alert from %@", NSStringFromClass([self class]));
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            ytk_presentRootOptions(self);
+            if (completion) completion();
+        });
+        return;
+    }
+
+    gPresentDepth++;
+    if (orig_presentViewController) {
+        orig_presentViewController(self, _cmd, vc, animated, completion);
+    }
+    gPresentDepth--;
+}
+
+static void ytk_installPresentInterceptor(void) {
+    Method m = class_getInstanceMethod([UIViewController class], @selector(presentViewController:animated:completion:));
+    if (!m) { ytk_log(@"present interceptor failed: method missing"); return; }
+    IMP cur = method_getImplementation(m);
+    if (cur == (IMP)ytk_presentViewController_hook) {
+        ytk_log(@"present interceptor already installed");
+        return;
+    }
+    orig_presentViewController = (void (*)(id, SEL, UIViewController *, BOOL, void (^)(void)))method_setImplementation(m, (IMP)ytk_presentViewController_hook);
+    ytk_log(@"present interceptor installed");
+}
+
 static void ytk_openCheckLicense_replacement(id self, SEL _cmd) {
     ytk_log(@"hit openCheckLicense on %@", NSStringFromClass([self class]));
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)),
@@ -177,10 +234,12 @@ static void ytk_retrySwizzle(int attempt) {
 __attribute__((constructor))
 static void init(void) {
     [[NSFileManager defaultManager] removeItemAtPath:ytk_logPath() error:nil];
-    ytk_log(@"boot v2.7-watchdog-fix constructor entered");
+    ytk_log(@"boot v2.8-alert-intercept constructor entered");
 
     preseedKeychain();
     ytk_log(@"preseed done");
+
+    ytk_installPresentInterceptor();
 
     dispatch_async(dispatch_get_main_queue(), ^{
         ytk_retrySwizzle(1);
@@ -189,3 +248,4 @@ static void init(void) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{ ytk_log(@"5s heartbeat reached"); });
 }
+
