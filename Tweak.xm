@@ -1,10 +1,9 @@
 /*
  *  YTKHelper / YTKActivator v2.8-alert-intercept
- *  YTKHelper / YTKActivator v3.3-portrait-gear-and-active-ui
+ *  YTKHelper / YTKActivator v3.4-credit-popup
  *
- *  v3.2 made the first gear direct-open. This build keeps that overlay aligned
- *  after portrait/landscape layout changes, and forces the root settings page
- *  to display enabled/active status.
+ *  v3.3 fixed portrait gear layout and active status visuals. This build
+ *  restores the one-time first-launch credit popup.
  *
  *  Made by itzzace
  */
@@ -27,6 +26,7 @@ static NSString *const kYTKVersion  = @"5.6.1";
 static NSString *const kJunkSeal    = @"INVALID-SEAL-FORCE-VERIFY-FAIL";
 static NSString *const kFutureTs    = @"9999999999.000";
 static NSInteger const kYTKDirectSettingsOverlayTag = 0x59544b31;
+static NSString *const kYTKHelperBuildVersion = @"3.4";
 
 static const uintptr_t kYTKPrepareSettingsGateOffset = 0x000b7f2c;
 static const uintptr_t kYTKOpenSettingsGatedOffset   = 0x000b8000;
@@ -342,6 +342,41 @@ static void ytk_installPresentInterceptor(void) {
     ytk_log(@"present interceptor installed");
 }
 
+static void ytk_showCreditPopupIfNeeded(void) {
+    NSString *key = @"com.itzzace.ytkhelper.creditPopupVersion";
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    if ([[defaults stringForKey:key] isEqualToString:kYTKHelperBuildVersion]) return;
+    [defaults setObject:kYTKHelperBuildVersion forKey:key];
+    [defaults synchronize];
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        UIViewController *host = ytk_topVC();
+        if (!host) {
+            ytk_log(@"credit popup skipped: no host");
+            return;
+        }
+        UIAlertController *alert = [UIAlertController
+            alertControllerWithTitle:@"YTKHelper"
+            message:@"YTKPlus activated by itzzace."
+            preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleCancel handler:nil]];
+
+        gPresentDepth++;
+        if (orig_presentViewController) {
+            orig_presentViewController(host,
+                                       @selector(presentViewController:animated:completion:),
+                                       alert,
+                                       YES,
+                                       nil);
+        } else {
+            [host presentViewController:alert animated:YES completion:nil];
+        }
+        gPresentDepth--;
+        ytk_log(@"credit popup shown");
+    });
+}
+
 static void ytk_openCheckLicense_replacement(id self, SEL _cmd) {
     ytk_log(@"hit openCheckLicense on %@", NSStringFromClass([self class]));
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)),
@@ -591,12 +626,13 @@ static void ytk_retrySwizzle(int attempt) {
 __attribute__((constructor))
 static void init(void) {
     [[NSFileManager defaultManager] removeItemAtPath:ytk_logPath() error:nil];
-    ytk_log(@"boot v3.3-portrait-gear-and-active-ui constructor entered");
+    ytk_log(@"boot v3.4-credit-popup constructor entered");
 
     preseedKeychain();
     ytk_log(@"preseed done");
 
     ytk_installPresentInterceptor();
+    ytk_showCreditPopupIfNeeded();
 
     dispatch_async(dispatch_get_main_queue(), ^{
         ytk_retrySwizzle(1);
