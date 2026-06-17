@@ -1,9 +1,9 @@
 /*
  *  YTKHelper / YTKActivator v2.8-alert-intercept
- *  YTKHelper / YTKActivator v3.4-credit-popup
+ *  YTKHelper / YTKActivator v3.5-long-press-cleaner
  *
- *  v3.3 fixed portrait gear layout and active status visuals. This build
- *  restores the one-time first-launch credit popup.
+ *  v3.4 restored the one-time credit popup. This build mimics the original
+ *  first gear long-press cleaner menu on the direct-open overlay.
  *
  *  Made by itzzace
  */
@@ -388,6 +388,26 @@ static void ytk_firstSettingsButtonTapped(id self, SEL _cmd, id sender) {
     ytk_openYTKSettingsViaGatedPath(self);
 }
 
+static void ytk_firstSettingsButtonLongPressed(id self, SEL _cmd, UILongPressGestureRecognizer *recognizer) {
+    if (recognizer.state != UIGestureRecognizerStateBegan) return;
+
+    ytk_log(@"first settings gear long-pressed on %@", NSStringFromClass([self class]));
+    SEL feedbackSel = sel_registerName("provideFeedback");
+    if ([self respondsToSelector:feedbackSel]) {
+        ((void (*)(id, SEL))objc_msgSend)(self, feedbackSel);
+    } else {
+        UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
+        [feedback impactOccurred];
+    }
+
+    SEL cleanerSel = sel_registerName("showCleanerOptions");
+    if ([self respondsToSelector:cleanerSel]) {
+        ((void (*)(id, SEL))objc_msgSend)(self, cleanerSel);
+    } else {
+        ytk_log(@"long press failed: showCleanerOptions missing");
+    }
+}
+
 static void ytk_installFirstGearOverlay(id self);
 
 static NSArray<UIView *> *ytk_allSubviews(UIView *root) {
@@ -479,6 +499,9 @@ static void ytk_installFirstGearOverlay(id self) {
     overlay.frame = CGRectInset(frame, -6.0, -6.0);
     overlay.backgroundColor = UIColor.clearColor;
     [overlay addTarget:self action:@selector(ytk_firstSettingsButtonTapped:) forControlEvents:UIControlEventTouchUpInside];
+    UILongPressGestureRecognizer *longPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(ytk_firstSettingsButtonLongPressed:)];
+    longPress.minimumPressDuration = 1.0;
+    [overlay addGestureRecognizer:longPress];
     [root addSubview:overlay];
     ytk_log(@"first gear overlay installed frame=%@", NSStringFromCGRect(overlay.frame));
 }
@@ -567,6 +590,7 @@ static BOOL ytk_swizzleClassNamed(NSString *className) {
     Class cls = NSClassFromString(className);
     if (!cls) return NO;
     class_addMethod(cls, @selector(ytk_firstSettingsButtonTapped:), (IMP)ytk_firstSettingsButtonTapped, "v@:@");
+    class_addMethod(cls, @selector(ytk_firstSettingsButtonLongPressed:), (IMP)ytk_firstSettingsButtonLongPressed, "v@:@");
 
     SEL setupSel = sel_registerName("setupSettingsButton");
     Method setupMethod = class_getInstanceMethod(cls, setupSel);
@@ -626,7 +650,7 @@ static void ytk_retrySwizzle(int attempt) {
 __attribute__((constructor))
 static void init(void) {
     [[NSFileManager defaultManager] removeItemAtPath:ytk_logPath() error:nil];
-    ytk_log(@"boot v3.4-credit-popup constructor entered");
+    ytk_log(@"boot v3.5-long-press-cleaner constructor entered");
 
     preseedKeychain();
     ytk_log(@"preseed done");
