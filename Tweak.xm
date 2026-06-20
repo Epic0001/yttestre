@@ -1,9 +1,9 @@
 /*
  *  YTKHelper / YTKActivator v2.8-alert-intercept
- *  YTKHelper / YTKActivator v3.7-new-ytkplus-offsets
+ *  YTKHelper / YTKActivator v3.8-new-setup-selector
  *
- *  v3.6 reseeded activation through early launch timing. This build updates
- *  the private YTKPlus helper offsets for the newer YTKPlus dylib layout.
+ *  v3.7 updated private offsets for the newer YTKPlus dylib. This build also
+ *  handles the new obfuscated DownloadsController settings setup selector.
  *
  *  Made by itzzace
  */
@@ -26,7 +26,7 @@ static NSString *const kYTKVersion  = @"5.6.1";
 static NSString *const kJunkSeal    = @"INVALID-SEAL-FORCE-VERIFY-FAIL";
 static NSString *const kFutureTs    = @"9999999999.000";
 static NSInteger const kYTKDirectSettingsOverlayTag = 0x59544b31;
-static NSString *const kYTKHelperBuildVersion = @"3.7";
+static NSString *const kYTKHelperBuildVersion = @"3.8";
 
 static const uintptr_t kYTKCompletionOpenSettingsOffset = 0x000b6cc8;
 static const uintptr_t kYTKReadKeychainOffset           = 0x000b6b3c;
@@ -636,15 +636,20 @@ static BOOL ytk_swizzleClassNamed(NSString *className) {
     class_addMethod(cls, @selector(ytk_firstSettingsButtonTapped:), (IMP)ytk_firstSettingsButtonTapped, "v@:@");
     class_addMethod(cls, @selector(ytk_firstSettingsButtonLongPressed:), (IMP)ytk_firstSettingsButtonLongPressed, "v@:@");
 
-    SEL setupSel = sel_registerName("setupSettingsButton");
-    Method setupMethod = class_getInstanceMethod(cls, setupSel);
-    if (setupMethod) {
+    Method setupMethod = NULL;
+    NSArray<NSString *> *setupSelectorNames = @[ @"setupSettingsButton", @"ayTrknboXotbgare" ];
+    for (NSString *setupSelectorName in setupSelectorNames) {
+        SEL setupSel = sel_registerName(setupSelectorName.UTF8String);
+        setupMethod = class_getInstanceMethod(cls, setupSel);
+        if (!setupMethod) continue;
         IMP cur = method_getImplementation(setupMethod);
         if (cur != (IMP)ytk_setupSettingsButton_hook) {
             orig_setupSettingsButton = (void (*)(id, SEL))method_setImplementation(setupMethod, (IMP)ytk_setupSettingsButton_hook);
-            ytk_log(@"swizzled %@ setupSettingsButton", className);
+            ytk_log(@"swizzled %@ %@", className, setupSelectorName);
         }
-
+        break;
+    }
+    if (setupMethod) {
         SEL layoutSel = @selector(viewDidLayoutSubviews);
         IMP currentLayout = class_getMethodImplementation(cls, layoutSel);
         if (currentLayout != (IMP)ytk_downloadsViewDidLayoutSubviews_hook) {
@@ -694,7 +699,7 @@ static void ytk_retrySwizzle(int attempt) {
 __attribute__((constructor))
 static void init(void) {
     [[NSFileManager defaultManager] removeItemAtPath:ytk_logPath() error:nil];
-    ytk_log(@"boot v3.7-new-ytkplus-offsets constructor entered");
+    ytk_log(@"boot v3.8-new-setup-selector constructor entered");
 
     preseedKeychain();
     ytk_log(@"preseed done");
