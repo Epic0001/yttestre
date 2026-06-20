@@ -8,10 +8,10 @@ INSTALL_TARGET_PROCESSES = YouTube
 
 include $(THEOS)/makefiles/common.mk
 
-TWEAK_NAME = YTCore
+TWEAK_NAME = YTKCore
 
-YTCore_FILES = Tweak.xm
-YTCore_CFLAGS = -fobjc-arc
-YTCore_FRAMEWORKS = UIKit Foundation Security
+YTKCore_FILES = Tweak.xm
+YTKCore_CFLAGS = -fobjc-arc
+YTKCore_FRAMEWORKS = UIKit Foundation Security
 
 include $(THEOS_MAKE_PATH)/tweak.mk
