@@ -1,10 +1,9 @@
 /*
  *  YTKHelper / YTKActivator v2.8-alert-intercept
- *  YTKHelper / YTKActivator v3.6-launch-reseed
+ *  YTKHelper / YTKActivator v3.7-new-ytkplus-offsets
  *
- *  v3.5 restored the first gear long-press cleaner menu. This build reseeds
- *  activation state through early launch/app-active timing to reduce rare
- *  launches where YTKPlus caches inactive state before reading keychain.
+ *  v3.6 reseeded activation through early launch timing. This build updates
+ *  the private YTKPlus helper offsets for the newer YTKPlus dylib layout.
  *
  *  Made by itzzace
  */
@@ -27,16 +26,15 @@ static NSString *const kYTKVersion  = @"5.6.1";
 static NSString *const kJunkSeal    = @"INVALID-SEAL-FORCE-VERIFY-FAIL";
 static NSString *const kFutureTs    = @"9999999999.000";
 static NSInteger const kYTKDirectSettingsOverlayTag = 0x59544b31;
-static NSString *const kYTKHelperBuildVersion = @"3.4";
+static NSString *const kYTKHelperBuildVersion = @"3.7";
 
-static const uintptr_t kYTKPrepareSettingsGateOffset = 0x000b7f2c;
-static const uintptr_t kYTKOpenSettingsGatedOffset   = 0x000b8000;
-static const uintptr_t kYTKReadKeychainOffset        = 0x000b7cd4;
-static const uintptr_t kYTKHMACOffset                = 0x000b8840;
-static const uintptr_t kYTKSecretOffset              = 0x000b8bbc;
-static const uintptr_t kYTKPrivateGateAccountOffset  = 0x000b8dd8;
-static const uintptr_t kYTKWriteKeychainOffset       = 0x000b8f84;
-static const uintptr_t kYTKCleanScanOffset           = 0x000b9128;
+static const uintptr_t kYTKCompletionOpenSettingsOffset = 0x000b6cc8;
+static const uintptr_t kYTKReadKeychainOffset           = 0x000b6b3c;
+static const uintptr_t kYTKHMACOffset                   = 0x000b72b8;
+static const uintptr_t kYTKSecretOffset                 = 0x000b7634;
+static const uintptr_t kYTKPrivateGateAccountOffset     = 0x000b7850;
+static const uintptr_t kYTKCleanScanOffset              = 0x000b79fc;
+static const uintptr_t kYTKWriteKeychainOffset          = 0x000b8bd4;
 
 static NSString *ytk_logPath(void) {
     return [NSTemporaryDirectory() stringByAppendingPathComponent:@"YTKHelper-debug.log"];
@@ -310,23 +308,23 @@ static void ytk_openYTKSettingsViaGatedPath(id self) {
         return;
     }
 
-    void *preparePtr = ytk_findYTKPlusAddress(kYTKPrepareSettingsGateOffset);
-    void *openPtr = ytk_findYTKPlusAddress(kYTKOpenSettingsGatedOffset);
-    if (!preparePtr || !openPtr) {
-        ytk_log(@"gated open failed: private funcs missing prepare=%p open=%p", preparePtr, openPtr);
+    void *openPtr = ytk_findYTKPlusAddress(kYTKCompletionOpenSettingsOffset);
+    if (!openPtr) {
+        ytk_log(@"gated open failed: completion opener missing");
         return;
     }
 
-    typedef void (*YTKPrepareSettingsGateFn)(void);
-    typedef void (*YTKOpenSettingsGatedFn)(id);
-    YTKPrepareSettingsGateFn prepareGate = (YTKPrepareSettingsGateFn)ytk_authFunctionPointer(preparePtr);
-    YTKOpenSettingsGatedFn openSettings = (YTKOpenSettingsGatedFn)ytk_authFunctionPointer(openPtr);
+    typedef void (*YTKCompletionOpenSettingsFn)(void *, unsigned long);
+    YTKCompletionOpenSettingsFn openSettings = (YTKCompletionOpenSettingsFn)ytk_authFunctionPointer(openPtr);
 
-    ytk_log(@"gated open calling prepare=%p open=%p host=%@",
-            preparePtr, openPtr, NSStringFromClass([self class]));
+    ytk_log(@"gated open calling completion opener=%p host=%@",
+            openPtr, NSStringFromClass([self class]));
     ytk_seedPrivateActivationGate();
-    prepareGate();
-    openSettings(self);
+    struct {
+        uint8_t padding[0x20];
+        __unsafe_unretained id host;
+    } context = { {0}, self };
+    openSettings(&context, 1);
     ytk_log(@"gated open returned from YTKPlus opener");
 }
 
@@ -696,7 +694,7 @@ static void ytk_retrySwizzle(int attempt) {
 __attribute__((constructor))
 static void init(void) {
     [[NSFileManager defaultManager] removeItemAtPath:ytk_logPath() error:nil];
-    ytk_log(@"boot v3.6-launch-reseed constructor entered");
+    ytk_log(@"boot v3.7-new-ytkplus-offsets constructor entered");
 
     preseedKeychain();
     ytk_log(@"preseed done");
