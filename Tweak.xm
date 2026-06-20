@@ -1,9 +1,9 @@
 /*
  *  YTKHelper / YTKActivator v2.8-alert-intercept
- *  YTKHelper / YTKActivator v3.8-new-setup-selector
+ *  YTKHelper / YTKActivator v3.9-active-label
  *
- *  v3.7 updated private offsets for the newer YTKPlus dylib. This build also
- *  handles the new obfuscated DownloadsController settings setup selector.
+ *  v3.8 handled the new obfuscated DownloadsController settings setup
+ *  selector. This build also rewrites the new active-date status label.
  *
  *  Made by itzzace
  */
@@ -26,7 +26,7 @@ static NSString *const kYTKVersion  = @"5.6.1";
 static NSString *const kJunkSeal    = @"INVALID-SEAL-FORCE-VERIFY-FAIL";
 static NSString *const kFutureTs    = @"9999999999.000";
 static NSInteger const kYTKDirectSettingsOverlayTag = 0x59544b31;
-static NSString *const kYTKHelperBuildVersion = @"3.8";
+static NSString *const kYTKHelperBuildVersion = @"3.9";
 
 static const uintptr_t kYTKCompletionOpenSettingsOffset = 0x000b6cc8;
 static const uintptr_t kYTKReadKeychainOffset           = 0x000b6b3c;
@@ -577,7 +577,9 @@ static void ytk_applyRootOptionsVisuals(id self) {
             UILabel *label = (UILabel *)view;
             NSString *text = label.text ?: @"";
             NSString *lower = text.lowercaseString;
-            if ([lower containsString:@"inactive"] || [lower containsString:@"verify license"]) {
+            if ([lower containsString:@"inactive"] ||
+                [lower containsString:@"verify license"] ||
+                ([lower containsString:@"active"] && [lower containsString:@"2030"])) {
                 label.text = @"Active (itzzace.)";
                 label.textColor = [UIColor systemGreenColor];
                 labels++;
@@ -699,7 +701,7 @@ static void ytk_retrySwizzle(int attempt) {
 __attribute__((constructor))
 static void init(void) {
     [[NSFileManager defaultManager] removeItemAtPath:ytk_logPath() error:nil];
-    ytk_log(@"boot v3.8-new-setup-selector constructor entered");
+    ytk_log(@"boot v3.9-active-label constructor entered");
 
     preseedKeychain();
     ytk_log(@"preseed done");
