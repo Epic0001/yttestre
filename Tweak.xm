@@ -1,10 +1,9 @@
 /*
  *  YTKHelper / YTKActivator v2.8-alert-intercept
- *  YTKHelper / YTKActivator v4.0-preserve-integrity-seal
+ *  YTKHelper / YTKActivator v4.1-ytkplus-5.7
  *
- *  v3.9 rewrote the new active-date status label. This build stops wiping
- *  the integrity seal during launch and reseeds the private gate repeatedly
- *  so feature checks initialize active more consistently.
+ *  v4.0 preserved the integrity seal during launch. This build updates the
+ *  YTKPlus version gate to 5.7.
  *
  *  Made by itzzace
  */
@@ -23,7 +22,7 @@
 
 static NSString *const kService     = @"me.ikghd.ytkplus.secure";
 static NSString *const kFakeLicense = @"ACTIVATED-0000-0000";
-static NSString *const kYTKVersion  = @"5.6.1";
+static NSString *const kYTKVersion  = @"5.7";
 static NSString *const kJunkSeal    = @"INVALID-SEAL-FORCE-VERIFY-FAIL";
 static NSString *const kFutureTs    = @"9999999999.000";
 static NSInteger const kYTKDirectSettingsOverlayTag = 0x59544b31;
@@ -704,7 +703,7 @@ static void ytk_retrySwizzle(int attempt) {
 __attribute__((constructor))
 static void init(void) {
     [[NSFileManager defaultManager] removeItemAtPath:ytk_logPath() error:nil];
-    ytk_log(@"boot v4.0-preserve-integrity-seal constructor entered");
+    ytk_log(@"boot v4.1-ytkplus-5.7 constructor entered");
 
     preseedKeychain();
     ytk_log(@"preseed done");
