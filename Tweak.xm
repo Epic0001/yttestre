@@ -1,9 +1,10 @@
 /*
  *  YTKHelper / YTKActivator v2.8-alert-intercept
- *  YTKHelper / YTKActivator v3.9-active-label
+ *  YTKHelper / YTKActivator v4.0-preserve-integrity-seal
  *
- *  v3.8 handled the new obfuscated DownloadsController settings setup
- *  selector. This build also rewrites the new active-date status label.
+ *  v3.9 rewrote the new active-date status label. This build stops wiping
+ *  the integrity seal during launch and reseeds the private gate repeatedly
+ *  so feature checks initialize active more consistently.
  *
  *  Made by itzzace
  */
@@ -26,7 +27,7 @@ static NSString *const kYTKVersion  = @"5.6.1";
 static NSString *const kJunkSeal    = @"INVALID-SEAL-FORCE-VERIFY-FAIL";
 static NSString *const kFutureTs    = @"9999999999.000";
 static NSInteger const kYTKDirectSettingsOverlayTag = 0x59544b31;
-static NSString *const kYTKHelperBuildVersion = @"3.9";
+static NSString *const kYTKHelperBuildVersion = @"4.0";
 
 static const uintptr_t kYTKCompletionOpenSettingsOffset = 0x000b6cc8;
 static const uintptr_t kYTKReadKeychainOffset           = 0x000b6b3c;
@@ -91,6 +92,8 @@ static NSString *readKeychainValue(NSString *account) {
     return [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
 }
 
+static void ytk_seedPrivateActivationGate(void);
+
 static void preseedKeychain(void) {
     writeKeychainValue(@"Etmvdvihq chmhc rml", @"1");
     writeKeychainValue(@"Enabledytk_status",    @"1");
@@ -116,7 +119,6 @@ static void preseedKeychain(void) {
     writeKeychainValue(@"ytk_last_contact_seal",   kJunkSeal);
     writeKeychainValue(@"auth_last_verified_ts",   kFutureTs);
     writeKeychainValue(@"auth_last_verified_seal", kJunkSeal);
-    writeKeychainValue(@"auth_integrity_seal",     nil);
 }
 
 static void preseedLaunchActivationState(NSString *reason) {
@@ -144,6 +146,7 @@ static void preseedLaunchActivationState(NSString *reason) {
     writeKeychainValue(@"ytk_last_contact_seal",   kJunkSeal);
     writeKeychainValue(@"auth_last_verified_ts",   kFutureTs);
     writeKeychainValue(@"auth_last_verified_seal", kJunkSeal);
+    ytk_seedPrivateActivationGate();
     ytk_log(@"launch activation state reseeded: %@", reason);
 }
 
@@ -701,7 +704,7 @@ static void ytk_retrySwizzle(int attempt) {
 __attribute__((constructor))
 static void init(void) {
     [[NSFileManager defaultManager] removeItemAtPath:ytk_logPath() error:nil];
-    ytk_log(@"boot v3.9-active-label constructor entered");
+    ytk_log(@"boot v4.0-preserve-integrity-seal constructor entered");
 
     preseedKeychain();
     ytk_log(@"preseed done");
