@@ -1,4 +1,4 @@
-name: Build YTCore
+name: Build YTKCore
 
 on:
   push:
@@ -10,7 +10,7 @@ jobs:
     runs-on: macos-latest
     strategy:
       matrix:
-        variant: [YTCore]
+        variant: [YTKCore]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
