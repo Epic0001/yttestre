@@ -1,5 +1,5 @@
 /*
- *  ytkcore v6.0-ytkplus-5.7.1
+ *  ytkcore v6.1-ytkplus-5.7.1
  *
  *  Preserves the integrity seal during launch and seeds the YTKPlus 5.7.1
  *  version gate. YTKPlus 5.7.1 rejects 5.7 after the server-side update.
@@ -13,6 +13,7 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <mach-o/dyld.h>
+#import <dlfcn.h>
 #import <sys/mman.h>
 #import <unistd.h>
 #import <libkern/OSCacheControl.h>
@@ -31,7 +32,7 @@ static NSString *const kYTKVersion  = @"5.7.1";
 static NSString *const kJunkSeal    = @"INVALID-SEAL-FORCE-VERIFY-FAIL";
 static NSString *const kFutureTs    = @"9999999999.000";
 static NSInteger const kYTKDirectSettingsOverlayTag = 0x59544b31;
-static NSString *const kYTKCoreBuildVersion = @"6.0";
+static NSString *const kYTKCoreBuildVersion = @"6.1";
 
 static const uintptr_t kYTKRootOptionsGatePrepOffset    = 0x000b91e0;
 static const uintptr_t kYTKFinalSettingsPresenterOffset = 0x000b9120;
@@ -44,6 +45,7 @@ static const uintptr_t kYTKPrivateGateAccountOffset     = 0x000b7cd4;
 static const uintptr_t kYTKCleanScanOffset              = 0x000b8690;
 static const uintptr_t kYTKWriteKeychainOffset          = 0x000ba628;
 static const uintptr_t kYTKRootOptionsValidationOffset  = 0x000f1f0c;
+static const uintptr_t kYTKMasterFeatureFlagPatchOffset = 0x00039808;
 
 static NSString *ytk_logPath(void) {
     return [NSTemporaryDirectory() stringByAppendingPathComponent:@"ytkcore-debug.log"];
@@ -155,6 +157,32 @@ static void preseedLaunchActivationState(NSString *reason) {
     writeKeychainValue(@"auth_last_verified_ts",   kFutureTs);
     writeKeychainValue(@"auth_last_verified_seal", kJunkSeal);
     ytk_log(@"launch keychain state reseeded without private calls: %@", reason);
+}
+
+static void preseedFeatureDefaults(void) {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    NSArray<NSString *> *enabledKeys = @[
+        @"kEnableDownloadit",
+        @"kEnablePlayInBackgrounds",
+        @"kEnableHoldToSeek",
+        @"kEnableisSpeed",
+        @"kEnableYTKPiP",
+        @"kEnableYTKLoop",
+        @"kEnableNoAds",
+        @"kEnablefixvideoplayback",
+        @"kEnableShowProgressBar",
+        @"kEnableShowMediaController",
+        @"kEnableCustomDoubleTapToSkipDuration",
+        @"kEnablePlayHDVideosOverCellur",
+        @"kEnableNoPremiumpopup",
+        @"kEnableNoYTUpdate",
+        @"kEnableNoExpirityDownloaded"
+    ];
+    for (NSString *key in enabledKeys) {
+        if ([defaults objectForKey:key] == nil) [defaults setBool:YES forKey:key];
+    }
+    [defaults synchronize];
+    ytk_log(@"feature defaults preseeded count=%lu", (unsigned long)enabledKeys.count);
 }
 
 static void scheduleLaunchReseeds(void) {
@@ -336,6 +364,39 @@ static _Thread_local int gPresentDepth = 0;
 static void (*orig_presentViewController)(id, SEL, UIViewController *, BOOL, void (^)(void)) = NULL;
 static BOOL gActivationGuardPatched = NO;
 static BOOL gRootOptionsValidationPatched = NO;
+static BOOL gMasterFeatureFlagPatched = NO;
+
+static BOOL ytk_patchYTKInstruction(uintptr_t offset,
+                                    uint32_t replacement,
+                                    NSString *label,
+                                    BOOL *patchedFlag) {
+    if (*patchedFlag) return YES;
+
+    void *ptr = ytk_findYTKPlusAddress(offset);
+    if (!ptr) {
+        ytk_log(@"%@ patch failed: instruction missing offset=0x%lx", label, (unsigned long)offset);
+        return NO;
+    }
+
+    uint32_t *code = (uint32_t *)ptr;
+    uint32_t original = code[0];
+    long pageSize = sysconf(_SC_PAGESIZE);
+    if (pageSize <= 0) pageSize = 0x4000;
+    uintptr_t page = (uintptr_t)ptr & ~((uintptr_t)pageSize - 1);
+
+    if (mprotect((void *)page, (size_t)pageSize, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
+        ytk_log(@"%@ patch failed: mprotect errno=%d ptr=%p", label, errno, ptr);
+        return NO;
+    }
+
+    code[0] = replacement;
+    sys_icache_invalidate(ptr, 4);
+    mprotect((void *)page, (size_t)pageSize, PROT_READ | PROT_EXEC);
+
+    *patchedFlag = YES;
+    ytk_log(@"%@ patched ptr=%p original=%08x replacement=%08x", label, ptr, original, replacement);
+    return YES;
+}
 
 static BOOL ytk_patchYTKFunctionReturnYES(uintptr_t offset, NSString *label, BOOL *patchedFlag) {
     if (*patchedFlag) return YES;
@@ -378,6 +439,24 @@ static BOOL ytk_patchRootOptionsValidationReturnYES(void) {
     return ytk_patchYTKFunctionReturnYES(kYTKRootOptionsValidationOffset,
                                          @"root options validation",
                                          &gRootOptionsValidationPatched);
+}
+
+static BOOL ytk_patchMasterFeatureFlagReturnActive(void) {
+    return ytk_patchYTKInstruction(kYTKMasterFeatureFlagPatchOffset,
+                                   0x5280003b, // mov w27, #1
+                                   @"master feature flag",
+                                   &gMasterFeatureFlagPatched);
+}
+
+static void ytk_patchStartupFeatureGates(NSString *reason) {
+    BOOL master = ytk_patchMasterFeatureFlagReturnActive();
+    BOOL activation = ytk_patchActivationGuardReturnYES();
+    BOOL root = ytk_patchRootOptionsValidationReturnYES();
+    ytk_log(@"startup feature gates patched reason=%@ master=%@ activation=%@ root=%@",
+            reason ?: @"nil",
+            master ? @"YES" : @"NO",
+            activation ? @"YES" : @"NO",
+            root ? @"YES" : @"NO");
 }
 
 static BOOL ytk_presentRootOptionsFallback(UIViewController *host) {
@@ -969,13 +1048,27 @@ static void ytk_retrySwizzle(int attempt) {
                    dispatch_get_main_queue(), ^{ ytk_retrySwizzle(attempt + 1); });
 }
 
+static void ytk_dyldCallback(const struct mach_header *mh, intptr_t slide) {
+    (void)slide;
+    Dl_info info;
+    if (!dladdr((const void *)mh, &info) || !info.dli_fname) return;
+    if (!strstr(info.dli_fname, "YTKPlus")) return;
+    ytk_log(@"YTKPlus image callback path=%s", info.dli_fname);
+    preseedLaunchActivationState(@"YTKPlus image callback");
+    preseedFeatureDefaults();
+    ytk_patchStartupFeatureGates(@"YTKPlus image callback");
+}
+
 __attribute__((constructor))
 static void init(void) {
     [[NSFileManager defaultManager] removeItemAtPath:ytk_logPath() error:nil];
-    ytk_log(@"boot v6.0-ytkplus-5.7.1 constructor entered");
+    ytk_log(@"boot v6.1-ytkplus-5.7.1 constructor entered");
 
     preseedKeychain();
     ytk_log(@"preseed done");
+    preseedFeatureDefaults();
+    _dyld_register_func_for_add_image(ytk_dyldCallback);
+    ytk_patchStartupFeatureGates(@"constructor");
     scheduleLaunchReseeds();
 
     ytk_installPresentInterceptor();
