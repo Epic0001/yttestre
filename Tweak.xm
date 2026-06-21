@@ -1,5 +1,5 @@
 /*
- *  ytkcore v5.2-ytkplus-5.7.1
+ *  ytkcore v5.3-ytkplus-5.7.1
  *
  *  Preserves the integrity seal during launch and seeds the YTKPlus 5.7.1
  *  version gate. YTKPlus 5.7.1 rejects 5.7 after the server-side update.
@@ -28,8 +28,9 @@ static NSString *const kYTKVersion  = @"5.7.1";
 static NSString *const kJunkSeal    = @"INVALID-SEAL-FORCE-VERIFY-FAIL";
 static NSString *const kFutureTs    = @"9999999999.000";
 static NSInteger const kYTKDirectSettingsOverlayTag = 0x59544b31;
-static NSString *const kYTKCoreBuildVersion = @"5.2";
+static NSString *const kYTKCoreBuildVersion = @"5.3";
 
+static const uintptr_t kYTKSaveAuthStateOffset          = 0x000b65e0;
 static const uintptr_t kYTKRootOptionsGatePrepOffset    = 0x000b91e0;
 static const uintptr_t kYTKFinalSettingsPresenterOffset = 0x000b9120;
 static const uintptr_t kYTKActivationGuardOffset        = 0x000b7758;
@@ -280,7 +281,24 @@ static void ytk_callYTKWrite(NSString *account, NSString *value) {
     fn(account, value);
 }
 
+static BOOL ytk_callYTKSaveAuthState(void) {
+    void *ptr = ytk_findYTKPlusAddress(kYTKSaveAuthStateOffset);
+    if (!ptr) return NO;
+
+    typedef void (*YTKSaveAuthFn)(unsigned long, id, id, id, id, id, id);
+    YTKSaveAuthFn fn = (YTKSaveAuthFn)ytk_authFunctionPointer(ptr);
+    fn(1,
+       @"01-01-2030 12:00 AM",
+       kFakeEmail,
+       kFakeLicense,
+       kFakeDevice,
+       kFakeToken,
+       @"9999999999");
+    return YES;
+}
+
 static void ytk_seedPrivateActivationGate(void) {
+    BOOL usedOfficialSave = ytk_callYTKSaveAuthState();
     NSString *account = ytk_callStringFunction(kYTKPrivateGateAccountOffset, @"gateAccount");
     NSString *secret = ytk_callStringFunction(kYTKSecretOffset, @"secret");
     NSString *clean = ytk_callStringFunction(kYTKCleanScanOffset, @"cleanScan");
@@ -289,25 +307,29 @@ static void ytk_seedPrivateActivationGate(void) {
     NSString *ytkExisting = account ? ytk_callYTKRead(account) : nil;
     NSString *device = readKeychainValue(@"auth_device_secure") ?: ytk_callYTKRead(@"auth_device_secure") ?: kFakeDevice;
 
-    NSString *sealInput = (shortHash.length && device.length) ? [shortHash stringByAppendingString:device] : nil;
-    NSString *integritySeal = sealInput ? ytk_callHMAC(sealInput, secret) : nil;
+    NSString *manualSealInput = (shortHash.length && device.length) ?
+        [NSString stringWithFormat:@"%@%@%@", shortHash, device, readKeychainValue(@"auth_session_token") ?: kFakeToken] : nil;
+    NSString *manualIntegritySeal = manualSealInput ? ytk_callHMAC(manualSealInput, secret) : nil;
+    NSString *officialIntegritySeal = readKeychainValue(@"auth_integrity_seal") ?: ytk_callYTKRead(@"auth_integrity_seal");
 
-    ytk_log(@"gate diag account=%@ existing=%@ ytkExisting=%@ device=%@ shortHash=%@ seal=%@ clean=%@",
+    ytk_log(@"gate diag officialSave=%@ account=%@ existing=%@ ytkExisting=%@ device=%@ shortHash=%@ officialSeal=%@ manualSeal=%@ clean=%@",
+            usedOfficialSave ? @"YES" : @"NO",
             account ?: @"nil",
             existing ?: @"nil",
             ytkExisting ?: @"nil",
             device ?: @"nil",
             shortHash ?: @"nil",
-            integritySeal ?: @"nil",
+            officialIntegritySeal ?: @"nil",
+            manualIntegritySeal ?: @"nil",
             clean ?: @"nil");
 
     if (account.length && shortHash.length) {
         writeKeychainValue(@"auth_device_secure", device);
         writeKeychainValue(account, shortHash);
         ytk_callYTKWrite(account, shortHash);
-        if (integritySeal.length) {
-            writeKeychainValue(@"auth_integrity_seal", integritySeal);
-            ytk_callYTKWrite(@"auth_integrity_seal", integritySeal);
+        if (!officialIntegritySeal.length && manualIntegritySeal.length) {
+            writeKeychainValue(@"auth_integrity_seal", manualIntegritySeal);
+            ytk_callYTKWrite(@"auth_integrity_seal", manualIntegritySeal);
         }
 
         NSString *gateAfter = readKeychainValue(account);
@@ -416,11 +438,13 @@ static void ytk_openYTKSettingsViaGatedPath(id self) {
                                  [topName containsString:@"RootOptionsController"];
         ytk_log(@"gated open returned from YTKPlus final presenter top=%@ hostPresented=%@ presented=%@",
                 topName, presentedName, presentedSettings ? @"YES" : @"NO");
-        if (!presentedSettings && [self isKindOfClass:[UIViewController class]]) {
+        if (!presentedSettings && guardBefore && [self isKindOfClass:[UIViewController class]]) {
             ytk_callVoidFunction(kYTKRootOptionsGatePrepOffset, @"rootOptionsGatePrepFallback");
             BOOL guardAfter = ytk_callBoolFunction(kYTKActivationGuardOffset, @"activationGuardFallback");
             ytk_log(@"gated open fallback path guard=%@", guardAfter ? @"YES" : @"NO");
-            ytk_presentRootOptionsFallback((UIViewController *)self);
+            if (guardAfter) ytk_presentRootOptionsFallback((UIViewController *)self);
+        } else if (!presentedSettings) {
+            ytk_log(@"gated open fallback skipped: activation guard is not passing");
         }
     });
 }
@@ -867,7 +891,7 @@ static void ytk_retrySwizzle(int attempt) {
 __attribute__((constructor))
 static void init(void) {
     [[NSFileManager defaultManager] removeItemAtPath:ytk_logPath() error:nil];
-    ytk_log(@"boot v5.2-ytkplus-5.7.1 constructor entered");
+    ytk_log(@"boot v5.3-ytkplus-5.7.1 constructor entered");
 
     preseedKeychain();
     ytk_log(@"preseed done");
