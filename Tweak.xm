@@ -1,5 +1,5 @@
 /*
- *  YTKElevator v4.4-ytkplus-5.7.1
+ *  YTKElevator v4.5-ytkplus-5.7.1
  *
  *  Preserves the integrity seal during launch and seeds the YTKPlus 5.7.1
  *  version gate. YTKPlus 5.7.1 rejects 5.7 after the server-side update.
@@ -25,7 +25,7 @@ static NSString *const kYTKVersion  = @"5.7.1";
 static NSString *const kJunkSeal    = @"INVALID-SEAL-FORCE-VERIFY-FAIL";
 static NSString *const kFutureTs    = @"9999999999.000";
 static NSInteger const kYTKDirectSettingsOverlayTag = 0x59544b31;
-static NSString *const kYTKElevatorBuildVersion = @"4.4";
+static NSString *const kYTKElevatorBuildVersion = @"4.5";
 
 static const uintptr_t kYTKDirectOpenSettingsOffset     = 0x000b9120;
 static const uintptr_t kYTKReadKeychainOffset           = 0x000b7a5c;
@@ -453,6 +453,62 @@ static void ytk_firstSettingsButtonLongPressed(id self, SEL _cmd, UILongPressGes
     }
 }
 
+static char kYTKElevatorCapturedFirstGearKey;
+static void (*orig_addSubview)(id, SEL, UIView *) = NULL;
+
+static UIViewController *ytk_hostControllerForView(UIView *view) {
+    UIResponder *responder = view;
+    while (responder) {
+        responder = responder.nextResponder;
+        if ([responder isKindOfClass:[UIViewController class]]) {
+            return (UIViewController *)responder;
+        }
+    }
+    return nil;
+}
+
+static BOOL ytk_isDownloadsControllerHost(id host) {
+    NSString *className = NSStringFromClass([host class]);
+    return [className isEqualToString:@"DownloadsController"] ||
+           [className isEqualToString:@"DownloadsController2"] ||
+           [className isEqualToString:@"DownloadsVideoController"] ||
+           [className isEqualToString:@"DownloadsAudioController"] ||
+           [className isEqualToString:@"DownloadsShortController"];
+}
+
+static void ytk_attachDirectTargetToFirstGear(UIView *container, UIView *subview) {
+    if (![subview isKindOfClass:[UIButton class]]) return;
+    UIViewController *host = ytk_hostControllerForView(container);
+    if (!host || !ytk_isDownloadsControllerHost(host)) return;
+    if (objc_getAssociatedObject(host, &kYTKElevatorCapturedFirstGearKey)) return;
+
+    Class cls = [host class];
+    class_addMethod(cls, @selector(ytk_firstSettingsButtonTapped:), (IMP)ytk_firstSettingsButtonTapped, "v@:@");
+    class_addMethod(cls, @selector(ytk_firstSettingsButtonLongPressed:), (IMP)ytk_firstSettingsButtonLongPressed, "v@:@");
+
+    UIButton *button = (UIButton *)subview;
+    [button addTarget:host action:@selector(ytk_firstSettingsButtonTapped:) forControlEvents:UIControlEventTouchUpInside];
+    objc_setAssociatedObject(host, &kYTKElevatorCapturedFirstGearKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    ytk_log(@"captured first YTKPlus gear button on %@", NSStringFromClass([host class]));
+}
+
+static void ytk_addSubview_hook(id self, SEL _cmd, UIView *subview) {
+    if (orig_addSubview) orig_addSubview(self, _cmd, subview);
+    ytk_attachDirectTargetToFirstGear((UIView *)self, subview);
+}
+
+static void ytk_installSubviewCapture(void) {
+    Method m = class_getInstanceMethod([UIView class], @selector(addSubview:));
+    if (!m) {
+        ytk_log(@"subview capture failed: addSubview missing");
+        return;
+    }
+    IMP cur = method_getImplementation(m);
+    if (cur == (IMP)ytk_addSubview_hook) return;
+    orig_addSubview = (void (*)(id, SEL, UIView *))method_setImplementation(m, (IMP)ytk_addSubview_hook);
+    ytk_log(@"subview capture installed");
+}
+
 static void ytk_installFirstGearOverlay(id self);
 
 static NSArray<UIView *> *ytk_allSubviews(UIView *root) {
@@ -702,13 +758,14 @@ static void ytk_retrySwizzle(int attempt) {
 __attribute__((constructor))
 static void init(void) {
     [[NSFileManager defaultManager] removeItemAtPath:ytk_logPath() error:nil];
-    ytk_log(@"boot v4.4-ytkplus-5.7.1 constructor entered");
+    ytk_log(@"boot v4.5-ytkplus-5.7.1 constructor entered");
 
     preseedKeychain();
     ytk_log(@"preseed done");
     scheduleLaunchReseeds();
 
     ytk_installPresentInterceptor();
+    ytk_installSubviewCapture();
     ytk_showCreditPopupIfNeeded();
 
     dispatch_async(dispatch_get_main_queue(), ^{
