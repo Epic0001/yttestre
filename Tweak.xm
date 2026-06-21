@@ -1,5 +1,5 @@
 /*
- *  ytkcore v4.9-ytkplus-5.7.1
+ *  ytkcore v5.0-ytkplus-5.7.1
  *
  *  Preserves the integrity seal during launch and seeds the YTKPlus 5.7.1
  *  version gate. YTKPlus 5.7.1 rejects 5.7 after the server-side update.
@@ -25,9 +25,10 @@ static NSString *const kYTKVersion  = @"5.7.1";
 static NSString *const kJunkSeal    = @"INVALID-SEAL-FORCE-VERIFY-FAIL";
 static NSString *const kFutureTs    = @"9999999999.000";
 static NSInteger const kYTKDirectSettingsOverlayTag = 0x59544b31;
-static NSString *const kYTKCoreBuildVersion = @"4.9";
+static NSString *const kYTKCoreBuildVersion = @"5.0";
 
 static const uintptr_t kYTKRootOptionsGatePrepOffset    = 0x000b91e0;
+static const uintptr_t kYTKFinalSettingsPresenterOffset = 0x000b9120;
 static const uintptr_t kYTKReadKeychainOffset           = 0x000b7a5c;
 static const uintptr_t kYTKHMACOffset                   = 0x000b7f04;
 static const uintptr_t kYTKExpectedGateValueOffset      = 0x000b7e80;
@@ -324,35 +325,26 @@ static void ytk_openYTKSettingsViaGatedPath(id self) {
 
     ytk_seedPrivateActivationGate();
     ytk_callVoidFunction(kYTKRootOptionsGatePrepOffset, @"rootOptionsGatePrep");
-
-    Class rootCls = NSClassFromString(@"RootOptionsController");
-    if (!rootCls) {
-        ytk_log(@"gated open failed: RootOptionsController missing");
+    void *presentPtr = ytk_findYTKPlusAddress(kYTKFinalSettingsPresenterOffset);
+    if (!presentPtr) {
+        ytk_log(@"gated open failed: final presenter missing");
         return;
     }
 
-    id root = nil;
-    SEL initWithStyle = @selector(initWithStyle:);
-    if ([rootCls instancesRespondToSelector:initWithStyle]) {
-        root = ((id (*)(id, SEL, NSInteger))objc_msgSend)([rootCls alloc], initWithStyle, 1);
-    } else {
-        root = [[rootCls alloc] init];
-    }
-    if (![root isKindOfClass:[UIViewController class]]) {
-        ytk_log(@"gated open failed: RootOptionsController invalid %@", root ? NSStringFromClass([root class]) : @"nil");
-        return;
-    }
+    typedef void (*YTKFinalSettingsPresenterFn)(void *);
+    YTKFinalSettingsPresenterFn presentSettings = (YTKFinalSettingsPresenterFn)ytk_authFunctionPointer(presentPtr);
 
-    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:(UIViewController *)root];
-    nav.modalPresentationStyle = UIModalPresentationFullScreen;
+    struct {
+        uint8_t padding[0x20];
+        __unsafe_unretained id host;
+    } context = { {0}, self };
 
-    ytk_log(@"gated open presenting RootOptionsController host=%@ gatePrep=0x%lx",
-            NSStringFromClass([self class]), (unsigned long)kYTKRootOptionsGatePrepOffset);
+    ytk_log(@"gated open calling YTKPlus final presenter=%p host=%@ gatePrep=0x%lx",
+            presentPtr, NSStringFromClass([self class]), (unsigned long)kYTKRootOptionsGatePrepOffset);
     gPresentDepth++;
-    [(UIViewController *)self presentViewController:nav animated:YES completion:^{
-        ytk_log(@"gated open presented RootOptionsController");
-    }];
+    presentSettings(&context);
     gPresentDepth--;
+    ytk_log(@"gated open returned from YTKPlus final presenter");
 }
 
 
@@ -517,23 +509,21 @@ static void ytk_attachDirectTargetToFirstGear(UIView *container, UIView *subview
     objc_setAssociatedObject(host, &kYTKCoreCapturedFirstGearKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     ytk_log(@"captured first YTKPlus gear button on %@", NSStringFromClass([host class]));
 
-    if ([className isEqualToString:@"DownloadsController2"]) {
-        if (!objc_getAssociatedObject(host, &kYTKCoreAutoForwardedGearKey)) {
-            objc_setAssociatedObject(host, &kYTKCoreAutoForwardedGearKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)),
-                           dispatch_get_main_queue(), ^{
-                if (button.window) {
-                    ytk_log(@"auto-forwarding intermediate YTKPlus gear through original action");
-                    [button sendActionsForControlEvents:UIControlEventTouchUpInside];
-                } else {
-                    ytk_log(@"auto-forward skipped: intermediate gear not visible");
-                }
-            });
-        }
-        return;
-    }
-
     [button addTarget:host action:@selector(ytk_firstSettingsButtonTapped:) forControlEvents:UIControlEventTouchUpInside];
+
+    if ([className isEqualToString:@"DownloadsController2"] &&
+        !objc_getAssociatedObject(host, &kYTKCoreAutoForwardedGearKey)) {
+        objc_setAssociatedObject(host, &kYTKCoreAutoForwardedGearKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            if (button.window) {
+                ytk_log(@"auto-forwarding intermediate YTKPlus gear through ytkcore action");
+                ytk_openYTKSettingsViaGatedPath(host);
+            } else {
+                ytk_log(@"auto-forward skipped: intermediate gear not visible");
+            }
+        });
+    }
 }
 
 static void ytk_addSubview_hook(id self, SEL _cmd, UIView *subview) {
@@ -802,7 +792,7 @@ static void ytk_retrySwizzle(int attempt) {
 __attribute__((constructor))
 static void init(void) {
     [[NSFileManager defaultManager] removeItemAtPath:ytk_logPath() error:nil];
-    ytk_log(@"boot v4.9-ytkplus-5.7.1 constructor entered");
+    ytk_log(@"boot v5.0-ytkplus-5.7.1 constructor entered");
 
     preseedKeychain();
     ytk_log(@"preseed done");
