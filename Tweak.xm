@@ -1,5 +1,5 @@
 /*
- *  ytkcore v6.3-ytkplus-5.7.1
+ *  ytkcore v6.4-ytkplus-5.7.1
  *
  *  Preserves the integrity seal during launch and seeds the YTKPlus 5.7.1
  *  version gate. YTKPlus 5.7.1 rejects 5.7 after the server-side update.
@@ -32,7 +32,7 @@ static NSString *const kYTKVersion  = @"5.7.1";
 static NSString *const kJunkSeal    = @"INVALID-SEAL-FORCE-VERIFY-FAIL";
 static NSString *const kFutureTs    = @"9999999999.000";
 static NSInteger const kYTKDirectSettingsOverlayTag = 0x59544b31;
-static NSString *const kYTKCoreBuildVersion = @"6.3";
+static NSString *const kYTKCoreBuildVersion = @"6.4";
 
 static const uintptr_t kYTKRootOptionsGatePrepOffset    = 0x000b91e0;
 static const uintptr_t kYTKFinalSettingsPresenterOffset = 0x000b9120;
@@ -46,6 +46,8 @@ static const uintptr_t kYTKCleanScanOffset              = 0x000b8690;
 static const uintptr_t kYTKWriteKeychainOffset          = 0x000ba628;
 static const uintptr_t kYTKRootOptionsValidationOffset  = 0x000f1f0c;
 static const uintptr_t kYTKMasterFeatureFlagPatchOffset = 0x00039808;
+static const uintptr_t kYTKDownloadFeatureGateOffset    = 0x0000683c;
+static const uintptr_t kYTKAdsFeatureGateOffset         = 0x0000c2f4;
 
 static NSString *ytk_logPath(void) {
     return [NSTemporaryDirectory() stringByAppendingPathComponent:@"ytkcore-debug.log"];
@@ -103,6 +105,8 @@ static NSString *readKeychainValue(NSString *account) {
 }
 
 static void ytk_seedPrivateActivationGate(void);
+static void *ytk_findYTKPlusAddress(uintptr_t offset);
+static void ytk_patchStartupFeatureGates(NSString *reason);
 
 static void preseedKeychain(void) {
     writeKeychainValue(@"Etmvdvihq chmhc rml", @"1");
@@ -253,6 +257,10 @@ static void scheduleLaunchReseeds(void) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay.doubleValue * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             preseedLaunchActivationState([NSString stringWithFormat:@"launch +%.2fs", delay.doubleValue]);
+            if (ytk_findYTKPlusAddress(kYTKPrivateGateAccountOffset)) {
+                ytk_seedPrivateActivationGate();
+                ytk_patchStartupFeatureGates([NSString stringWithFormat:@"launch +%.2fs", delay.doubleValue]);
+            }
             ytk_logFeaturePrefs([NSString stringWithFormat:@"launch +%.2fs", delay.doubleValue]);
         });
     }
@@ -262,6 +270,10 @@ static void scheduleLaunchReseeds(void) {
                                                        queue:[NSOperationQueue mainQueue]
                                                   usingBlock:^(__unused NSNotification *note) {
         preseedLaunchActivationState(@"app became active");
+        if (ytk_findYTKPlusAddress(kYTKPrivateGateAccountOffset)) {
+            ytk_seedPrivateActivationGate();
+            ytk_patchStartupFeatureGates(@"app became active");
+        }
         ytk_logFeaturePrefs(@"app became active");
     }];
 }
@@ -429,6 +441,8 @@ static void (*orig_presentViewController)(id, SEL, UIViewController *, BOOL, voi
 static BOOL gActivationGuardPatched = NO;
 static BOOL gRootOptionsValidationPatched = NO;
 static BOOL gMasterFeatureFlagPatched = NO;
+static BOOL gDownloadFeatureGatePatched = NO;
+static BOOL gAdsFeatureGatePatched = NO;
 
 static BOOL ytk_patchYTKInstruction(uintptr_t offset,
                                     uint32_t replacement,
@@ -505,6 +519,18 @@ static BOOL ytk_patchRootOptionsValidationReturnYES(void) {
                                          &gRootOptionsValidationPatched);
 }
 
+static BOOL ytk_patchDownloadFeatureGateReturnYES(void) {
+    return ytk_patchYTKFunctionReturnYES(kYTKDownloadFeatureGateOffset,
+                                         @"download feature gate",
+                                         &gDownloadFeatureGatePatched);
+}
+
+static BOOL ytk_patchAdsFeatureGateReturnYES(void) {
+    return ytk_patchYTKFunctionReturnYES(kYTKAdsFeatureGateOffset,
+                                         @"ads feature gate",
+                                         &gAdsFeatureGatePatched);
+}
+
 static BOOL ytk_patchMasterFeatureFlagReturnActive(void) {
     return ytk_patchYTKInstruction(kYTKMasterFeatureFlagPatchOffset,
                                    0x5280003b, // mov w27, #1
@@ -516,11 +542,15 @@ static void ytk_patchStartupFeatureGates(NSString *reason) {
     BOOL master = ytk_patchMasterFeatureFlagReturnActive();
     BOOL activation = ytk_patchActivationGuardReturnYES();
     BOOL root = ytk_patchRootOptionsValidationReturnYES();
-    ytk_log(@"startup feature gates patched reason=%@ master=%@ activation=%@ root=%@",
+    BOOL download = ytk_patchDownloadFeatureGateReturnYES();
+    BOOL ads = ytk_patchAdsFeatureGateReturnYES();
+    ytk_log(@"startup feature gates patched reason=%@ master=%@ activation=%@ root=%@ download=%@ ads=%@",
             reason ?: @"nil",
             master ? @"YES" : @"NO",
             activation ? @"YES" : @"NO",
-            root ? @"YES" : @"NO");
+            root ? @"YES" : @"NO",
+            download ? @"YES" : @"NO",
+            ads ? @"YES" : @"NO");
 }
 
 static BOOL ytk_presentRootOptionsFallback(UIViewController *host) {
@@ -1122,19 +1152,23 @@ static void ytk_dyldCallback(const struct mach_header *mh, intptr_t slide) {
     if (!strstr(info.dli_fname, "YTKPlus")) return;
     ytk_log(@"YTKPlus image callback path=%s", info.dli_fname);
     preseedLaunchActivationState(@"YTKPlus image callback");
+    ytk_seedPrivateActivationGate();
     ytk_patchStartupFeatureGates(@"YTKPlus image callback");
 }
 
 __attribute__((constructor))
 static void init(void) {
     [[NSFileManager defaultManager] removeItemAtPath:ytk_logPath() error:nil];
-    ytk_log(@"boot v6.3-ytkplus-5.7.1 constructor entered");
+    ytk_log(@"boot v6.4-ytkplus-5.7.1 constructor entered");
 
     preseedKeychain();
     ytk_log(@"preseed done");
     cleanupV61FeatureDefaultsIfNeeded();
     ytk_logFeaturePrefs(@"constructor after cleanup");
     _dyld_register_func_for_add_image(ytk_dyldCallback);
+    if (ytk_findYTKPlusAddress(kYTKPrivateGateAccountOffset)) {
+        ytk_seedPrivateActivationGate();
+    }
     ytk_patchStartupFeatureGates(@"constructor");
     scheduleLaunchReseeds();
 
