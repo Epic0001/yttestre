@@ -1,5 +1,5 @@
 /*
- *  ytkcore v5.0-ytkplus-5.7.1
+ *  ytkcore v5.1-ytkplus-5.7.1
  *
  *  Preserves the integrity seal during launch and seeds the YTKPlus 5.7.1
  *  version gate. YTKPlus 5.7.1 rejects 5.7 after the server-side update.
@@ -21,14 +21,16 @@
 
 static NSString *const kService     = @"me.ikghd.ytkplus.secure";
 static NSString *const kFakeLicense = @"ACTIVATED-0000-0000";
+static NSString *const kFakeEmail   = @"activated@itzzace.dev";
 static NSString *const kYTKVersion  = @"5.7.1";
 static NSString *const kJunkSeal    = @"INVALID-SEAL-FORCE-VERIFY-FAIL";
 static NSString *const kFutureTs    = @"9999999999.000";
 static NSInteger const kYTKDirectSettingsOverlayTag = 0x59544b31;
-static NSString *const kYTKCoreBuildVersion = @"5.0";
+static NSString *const kYTKCoreBuildVersion = @"5.1";
 
 static const uintptr_t kYTKRootOptionsGatePrepOffset    = 0x000b91e0;
 static const uintptr_t kYTKFinalSettingsPresenterOffset = 0x000b9120;
+static const uintptr_t kYTKActivationGuardOffset        = 0x000b7758;
 static const uintptr_t kYTKReadKeychainOffset           = 0x000b7a5c;
 static const uintptr_t kYTKHMACOffset                   = 0x000b7f04;
 static const uintptr_t kYTKExpectedGateValueOffset      = 0x000b7e80;
@@ -101,7 +103,7 @@ static void preseedKeychain(void) {
     writeKeychainValue(@"activation_logged",    @"1");
     writeKeychainValue(@"stats_sent_before",    @"1");
 
-    writeKeychainValue(@"auth_email_secure",    @"activated@ytk.local");
+    writeKeychainValue(@"auth_email_secure",    kFakeEmail);
     writeKeychainValue(@"auth_license_secure",  kFakeLicense);
     writeKeychainValue(@"auth_device_secure",   @"YTKHelper");
     writeKeychainValue(@"auth_expires_secure",  @"01-01-2030 12:00 AM");
@@ -128,7 +130,7 @@ static void preseedLaunchActivationState(NSString *reason) {
     writeKeychainValue(@"activation_logged",    @"1");
     writeKeychainValue(@"stats_sent_before",    @"1");
 
-    writeKeychainValue(@"auth_email_secure",    @"activated@ytk.local");
+    writeKeychainValue(@"auth_email_secure",    kFakeEmail);
     writeKeychainValue(@"auth_license_secure",  kFakeLicense);
     writeKeychainValue(@"auth_device_secure",   @"YTKHelper");
     writeKeychainValue(@"auth_expires_secure",  @"01-01-2030 12:00 AM");
@@ -237,6 +239,17 @@ static void ytk_callVoidFunction(uintptr_t offset, NSString *name) {
     fn();
 }
 
+static BOOL ytk_callBoolFunction(uintptr_t offset, NSString *name) {
+    void *ptr = ytk_findYTKPlusAddress(offset);
+    if (!ptr) {
+        ytk_log(@"private %@ missing at offset 0x%lx", name, (unsigned long)offset);
+        return NO;
+    }
+    typedef int (*YTKBoolFn)(void);
+    YTKBoolFn fn = (YTKBoolFn)ytk_authFunctionPointer(ptr);
+    return fn() != 0;
+}
+
 static NSString *ytk_callHMAC(NSString *data, NSString *key) {
     void *ptr = ytk_findYTKPlusAddress(kYTKHMACOffset);
     if (!ptr || !data || !key) return nil;
@@ -309,6 +322,45 @@ static void ytk_seedPrivateActivationGate(void) {
 }
 
 static _Thread_local int gPresentDepth = 0;
+static void (*orig_presentViewController)(id, SEL, UIViewController *, BOOL, void (^)(void)) = NULL;
+
+static BOOL ytk_presentRootOptionsFallback(UIViewController *host) {
+    Class rootClass = NSClassFromString(@"RootOptionsController");
+    if (!rootClass) {
+        ytk_log(@"fallback present failed: RootOptionsController missing");
+        return NO;
+    }
+
+    id root = [[rootClass alloc] initWithStyle:UITableViewStyleGrouped];
+    if (!root) {
+        ytk_log(@"fallback present failed: RootOptionsController init returned nil");
+        return NO;
+    }
+
+    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:root];
+    nav.modalPresentationStyle = UIModalPresentationFullScreen;
+    ytk_log(@"fallback presenting RootOptionsController host=%@ root=%@",
+            NSStringFromClass([host class]), NSStringFromClass([root class]));
+
+    gPresentDepth++;
+    if (orig_presentViewController) {
+        orig_presentViewController(host,
+                                   @selector(presentViewController:animated:completion:),
+                                   nav,
+                                   YES,
+                                   ^{
+            ytk_log(@"fallback present completion top=%@",
+                    ytk_topVC() ? NSStringFromClass([ytk_topVC() class]) : @"nil");
+        });
+    } else {
+        [host presentViewController:nav animated:YES completion:^{
+            ytk_log(@"fallback present completion top=%@",
+                    ytk_topVC() ? NSStringFromClass([ytk_topVC() class]) : @"nil");
+        }];
+    }
+    gPresentDepth--;
+    return YES;
+}
 
 static void ytk_openYTKSettingsViaGatedPath(id self) {
     if (![self isKindOfClass:[UIViewController class]]) {
@@ -325,9 +377,15 @@ static void ytk_openYTKSettingsViaGatedPath(id self) {
 
     ytk_seedPrivateActivationGate();
     ytk_callVoidFunction(kYTKRootOptionsGatePrepOffset, @"rootOptionsGatePrep");
+    BOOL guardBefore = ytk_callBoolFunction(kYTKActivationGuardOffset, @"activationGuard");
+    ytk_log(@"gated open activationGuard=%@ email=%@ token=%@",
+            guardBefore ? @"YES" : @"NO",
+            readKeychainValue(@"auth_email_secure") ?: @"nil",
+            readKeychainValue(@"auth_session_token") ?: @"nil");
     void *presentPtr = ytk_findYTKPlusAddress(kYTKFinalSettingsPresenterOffset);
     if (!presentPtr) {
         ytk_log(@"gated open failed: final presenter missing");
+        ytk_presentRootOptionsFallback((UIViewController *)self);
         return;
     }
 
@@ -344,11 +402,22 @@ static void ytk_openYTKSettingsViaGatedPath(id self) {
     gPresentDepth++;
     presentSettings(&context);
     gPresentDepth--;
-    ytk_log(@"gated open returned from YTKPlus final presenter");
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        UIViewController *top = ytk_topVC();
+        NSString *topName = top ? NSStringFromClass([top class]) : @"nil";
+        BOOL presentedSettings = [top isKindOfClass:NSClassFromString(@"UINavigationController")] ||
+                                 [topName containsString:@"RootOptionsController"];
+        ytk_log(@"gated open returned from YTKPlus final presenter top=%@ presented=%@",
+                topName, presentedSettings ? @"YES" : @"NO");
+        if (!presentedSettings && [self isKindOfClass:[UIViewController class]]) {
+            ytk_callVoidFunction(kYTKRootOptionsGatePrepOffset, @"rootOptionsGatePrepFallback");
+            BOOL guardAfter = ytk_callBoolFunction(kYTKActivationGuardOffset, @"activationGuardFallback");
+            ytk_log(@"gated open fallback path guard=%@", guardAfter ? @"YES" : @"NO");
+            ytk_presentRootOptionsFallback((UIViewController *)self);
+        }
+    });
 }
-
-
-static void (*orig_presentViewController)(id, SEL, UIViewController *, BOOL, void (^)(void)) = NULL;
 
 static BOOL ytk_isLicenseOptionsAlert(UIViewController *vc) {
     if (![vc isKindOfClass:[UIAlertController class]]) return NO;
@@ -792,7 +861,7 @@ static void ytk_retrySwizzle(int attempt) {
 __attribute__((constructor))
 static void init(void) {
     [[NSFileManager defaultManager] removeItemAtPath:ytk_logPath() error:nil];
-    ytk_log(@"boot v5.0-ytkplus-5.7.1 constructor entered");
+    ytk_log(@"boot v5.1-ytkplus-5.7.1 constructor entered");
 
     preseedKeychain();
     ytk_log(@"preseed done");
