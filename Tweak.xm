@@ -1,5 +1,5 @@
 /*
- *  ytkcore v4.8-ytkplus-5.7.1
+ *  ytkcore v4.9-ytkplus-5.7.1
  *
  *  Preserves the integrity seal during launch and seeds the YTKPlus 5.7.1
  *  version gate. YTKPlus 5.7.1 rejects 5.7 after the server-side update.
@@ -25,7 +25,7 @@ static NSString *const kYTKVersion  = @"5.7.1";
 static NSString *const kJunkSeal    = @"INVALID-SEAL-FORCE-VERIFY-FAIL";
 static NSString *const kFutureTs    = @"9999999999.000";
 static NSInteger const kYTKDirectSettingsOverlayTag = 0x59544b31;
-static NSString *const kYTKCoreBuildVersion = @"4.8";
+static NSString *const kYTKCoreBuildVersion = @"4.9";
 
 static const uintptr_t kYTKRootOptionsGatePrepOffset    = 0x000b91e0;
 static const uintptr_t kYTKReadKeychainOffset           = 0x000b7a5c;
@@ -479,6 +479,7 @@ static void ytk_firstSettingsButtonLongPressed(id self, SEL _cmd, UILongPressGes
 }
 
 static char kYTKCoreCapturedFirstGearKey;
+static char kYTKCoreAutoForwardedGearKey;
 static void (*orig_addSubview)(id, SEL, UIView *) = NULL;
 
 static UIViewController *ytk_hostControllerForView(UIView *view) {
@@ -511,10 +512,28 @@ static void ytk_attachDirectTargetToFirstGear(UIView *container, UIView *subview
     class_addMethod(cls, @selector(ytk_firstSettingsButtonTapped:), (IMP)ytk_firstSettingsButtonTapped, "v@:@");
     class_addMethod(cls, @selector(ytk_firstSettingsButtonLongPressed:), (IMP)ytk_firstSettingsButtonLongPressed, "v@:@");
 
+    NSString *className = NSStringFromClass([host class]);
     UIButton *button = (UIButton *)subview;
-    [button addTarget:host action:@selector(ytk_firstSettingsButtonTapped:) forControlEvents:UIControlEventTouchUpInside];
     objc_setAssociatedObject(host, &kYTKCoreCapturedFirstGearKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     ytk_log(@"captured first YTKPlus gear button on %@", NSStringFromClass([host class]));
+
+    if ([className isEqualToString:@"DownloadsController2"]) {
+        if (!objc_getAssociatedObject(host, &kYTKCoreAutoForwardedGearKey)) {
+            objc_setAssociatedObject(host, &kYTKCoreAutoForwardedGearKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                if (button.window) {
+                    ytk_log(@"auto-forwarding intermediate YTKPlus gear through original action");
+                    [button sendActionsForControlEvents:UIControlEventTouchUpInside];
+                } else {
+                    ytk_log(@"auto-forward skipped: intermediate gear not visible");
+                }
+            });
+        }
+        return;
+    }
+
+    [button addTarget:host action:@selector(ytk_firstSettingsButtonTapped:) forControlEvents:UIControlEventTouchUpInside];
 }
 
 static void ytk_addSubview_hook(id self, SEL _cmd, UIView *subview) {
@@ -783,7 +802,7 @@ static void ytk_retrySwizzle(int attempt) {
 __attribute__((constructor))
 static void init(void) {
     [[NSFileManager defaultManager] removeItemAtPath:ytk_logPath() error:nil];
-    ytk_log(@"boot v4.8-ytkplus-5.7.1 constructor entered");
+    ytk_log(@"boot v4.9-ytkplus-5.7.1 constructor entered");
 
     preseedKeychain();
     ytk_log(@"preseed done");
