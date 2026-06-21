@@ -1,5 +1,5 @@
 /*
- *  ytkcore v5.8-ytkplus-5.7.1
+ *  ytkcore v5.9-ytkplus-5.7.1
  *
  *  Preserves the integrity seal during launch and seeds the YTKPlus 5.7.1
  *  version gate. YTKPlus 5.7.1 rejects 5.7 after the server-side update.
@@ -31,7 +31,7 @@ static NSString *const kYTKVersion  = @"5.7.1";
 static NSString *const kJunkSeal    = @"INVALID-SEAL-FORCE-VERIFY-FAIL";
 static NSString *const kFutureTs    = @"9999999999.000";
 static NSInteger const kYTKDirectSettingsOverlayTag = 0x59544b31;
-static NSString *const kYTKCoreBuildVersion = @"5.8";
+static NSString *const kYTKCoreBuildVersion = @"5.9";
 
 static const uintptr_t kYTKRootOptionsGatePrepOffset    = 0x000b91e0;
 static const uintptr_t kYTKFinalSettingsPresenterOffset = 0x000b9120;
@@ -468,6 +468,31 @@ static void ytk_openYTKSettingsViaGatedPath(id self) {
     });
 }
 
+static void ytk_openYTKSettingsViaRootFallback(id self) {
+    if (![self isKindOfClass:[UIViewController class]]) {
+        UIViewController *top = ytk_topVC();
+        ytk_log(@"root fallback host remapped %@ -> %@",
+                NSStringFromClass([self class]),
+                top ? NSStringFromClass([top class]) : @"nil");
+        self = top;
+    }
+    if (!self) {
+        ytk_log(@"root fallback failed: no host");
+        return;
+    }
+
+    ytk_seedPrivateActivationGate();
+    ytk_patchActivationGuardReturnYES();
+    ytk_callVoidFunction(kYTKRootOptionsGatePrepOffset, @"rootOptionsGatePrepFallback");
+    BOOL guardBefore = ytk_callBoolFunction(kYTKActivationGuardOffset, @"activationGuardFallback");
+    ytk_log(@"root fallback opening guard=%@ email=%@ token=%@ host=%@",
+            guardBefore ? @"YES" : @"NO",
+            readKeychainValue(@"auth_email_secure") ?: @"nil",
+            readKeychainValue(@"auth_session_token") ?: @"nil",
+            NSStringFromClass([self class]));
+    ytk_presentRootOptionsFallback((UIViewController *)self);
+}
+
 static BOOL ytk_isLicenseOptionsAlert(UIViewController *vc) {
     if (![vc isKindOfClass:[UIAlertController class]]) return NO;
     UIAlertController *alert = (UIAlertController *)vc;
@@ -560,7 +585,7 @@ static void ytk_showCreditPopupIfNeeded(void) {
 static void ytk_openCheckLicense_replacement(id self, SEL _cmd) {
     ytk_log(@"hit openCheckLicense on %@", NSStringFromClass([self class]));
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{ ytk_openYTKSettingsViaGatedPath(self); });
+                   dispatch_get_main_queue(), ^{ ytk_openYTKSettingsViaRootFallback(self); });
 }
 
 static void ytk_prepareSettingsButtonTouch(id self, SEL _cmd, id sender) {
@@ -574,7 +599,7 @@ static void ytk_prepareSettingsButtonTouch(id self, SEL _cmd, id sender) {
 
 static void ytk_firstSettingsButtonTapped(id self, SEL _cmd, id sender) {
     ytk_log(@"first settings gear tapped on %@", NSStringFromClass([self class]));
-    ytk_openYTKSettingsViaGatedPath(self);
+    ytk_openYTKSettingsViaRootFallback(self);
 }
 
 static void ytk_firstSettingsButtonLongPressed(id self, SEL _cmd, UILongPressGestureRecognizer *recognizer) {
@@ -639,7 +664,8 @@ static void ytk_attachDirectTargetToFirstGear(UIView *container, UIView *subview
 
     if ([className isEqualToString:@"DownloadsController2"]) {
         [button addTarget:host action:@selector(ytk_prepareSettingsButtonTouch:) forControlEvents:UIControlEventTouchDown];
-        ytk_log(@"intermediate YTKPlus gear prepared through touch-down; original action left intact");
+        [button addTarget:host action:@selector(ytk_firstSettingsButtonTapped:) forControlEvents:UIControlEventTouchUpInside];
+        ytk_log(@"intermediate YTKPlus gear uses direct root fallback tap path");
     } else {
         [button addTarget:host action:@selector(ytk_firstSettingsButtonTapped:) forControlEvents:UIControlEventTouchUpInside];
     }
@@ -917,7 +943,7 @@ static void ytk_retrySwizzle(int attempt) {
 __attribute__((constructor))
 static void init(void) {
     [[NSFileManager defaultManager] removeItemAtPath:ytk_logPath() error:nil];
-    ytk_log(@"boot v5.8-ytkplus-5.7.1 constructor entered");
+    ytk_log(@"boot v5.9-ytkplus-5.7.1 constructor entered");
 
     preseedKeychain();
     ytk_log(@"preseed done");
