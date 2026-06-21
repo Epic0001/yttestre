@@ -1,5 +1,5 @@
 /*
- *  ytkcore v5.5-ytkplus-5.7.1
+ *  ytkcore v5.6-ytkplus-5.7.1
  *
  *  Preserves the integrity seal during launch and seeds the YTKPlus 5.7.1
  *  version gate. YTKPlus 5.7.1 rejects 5.7 after the server-side update.
@@ -13,6 +13,9 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <mach-o/dyld.h>
+#import <sys/mman.h>
+#import <unistd.h>
+#import <libkern/OSCacheControl.h>
 #if __has_include(<ptrauth.h>)
 #import <ptrauth.h>
 #endif
@@ -28,7 +31,7 @@ static NSString *const kYTKVersion  = @"5.7.1";
 static NSString *const kJunkSeal    = @"INVALID-SEAL-FORCE-VERIFY-FAIL";
 static NSString *const kFutureTs    = @"9999999999.000";
 static NSInteger const kYTKDirectSettingsOverlayTag = 0x59544b31;
-static NSString *const kYTKCoreBuildVersion = @"5.5";
+static NSString *const kYTKCoreBuildVersion = @"5.6";
 
 static const uintptr_t kYTKRootOptionsGatePrepOffset    = 0x000b91e0;
 static const uintptr_t kYTKFinalSettingsPresenterOffset = 0x000b9120;
@@ -330,6 +333,38 @@ static void ytk_seedPrivateActivationGate(void) {
 
 static _Thread_local int gPresentDepth = 0;
 static void (*orig_presentViewController)(id, SEL, UIViewController *, BOOL, void (^)(void)) = NULL;
+static BOOL gActivationGuardPatched = NO;
+
+static BOOL ytk_patchActivationGuardReturnYES(void) {
+    if (gActivationGuardPatched) return YES;
+
+    void *ptr = ytk_findYTKPlusAddress(kYTKActivationGuardOffset);
+    if (!ptr) {
+        ytk_log(@"activation guard patch failed: function missing");
+        return NO;
+    }
+
+    uint32_t *code = (uint32_t *)ptr;
+    uint32_t original0 = code[0];
+    uint32_t original1 = code[1];
+    long pageSize = sysconf(_SC_PAGESIZE);
+    if (pageSize <= 0) pageSize = 0x4000;
+    uintptr_t page = (uintptr_t)ptr & ~((uintptr_t)pageSize - 1);
+
+    if (mprotect((void *)page, (size_t)pageSize, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
+        ytk_log(@"activation guard patch failed: mprotect errno=%d ptr=%p", errno, ptr);
+        return NO;
+    }
+
+    code[0] = 0x52800020; // mov w0, #1
+    code[1] = 0xd65f03c0; // ret
+    sys_icache_invalidate(ptr, 8);
+    mprotect((void *)page, (size_t)pageSize, PROT_READ | PROT_EXEC);
+
+    gActivationGuardPatched = YES;
+    ytk_log(@"activation guard patched ptr=%p original=%08x %08x", ptr, original0, original1);
+    return YES;
+}
 
 static BOOL ytk_presentRootOptionsFallback(UIViewController *host) {
     Class rootClass = NSClassFromString(@"RootOptionsController");
@@ -383,6 +418,7 @@ static void ytk_openYTKSettingsViaGatedPath(id self) {
     }
 
     ytk_seedPrivateActivationGate();
+    ytk_patchActivationGuardReturnYES();
     ytk_callVoidFunction(kYTKRootOptionsGatePrepOffset, @"rootOptionsGatePrep");
     BOOL guardBefore = ytk_callBoolFunction(kYTKActivationGuardOffset, @"activationGuard");
     ytk_log(@"gated open activationGuard=%@ email=%@ token=%@",
@@ -873,7 +909,7 @@ static void ytk_retrySwizzle(int attempt) {
 __attribute__((constructor))
 static void init(void) {
     [[NSFileManager defaultManager] removeItemAtPath:ytk_logPath() error:nil];
-    ytk_log(@"boot v5.5-ytkplus-5.7.1 constructor entered");
+    ytk_log(@"boot v5.6-ytkplus-5.7.1 constructor entered");
 
     preseedKeychain();
     ytk_log(@"preseed done");
