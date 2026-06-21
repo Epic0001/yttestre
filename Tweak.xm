@@ -1,5 +1,5 @@
 /*
- *  ytkcore v6.1-ytkplus-5.7.1
+ *  ytkcore v6.2-ytkplus-5.7.1
  *
  *  Preserves the integrity seal during launch and seeds the YTKPlus 5.7.1
  *  version gate. YTKPlus 5.7.1 rejects 5.7 after the server-side update.
@@ -32,7 +32,7 @@ static NSString *const kYTKVersion  = @"5.7.1";
 static NSString *const kJunkSeal    = @"INVALID-SEAL-FORCE-VERIFY-FAIL";
 static NSString *const kFutureTs    = @"9999999999.000";
 static NSInteger const kYTKDirectSettingsOverlayTag = 0x59544b31;
-static NSString *const kYTKCoreBuildVersion = @"6.1";
+static NSString *const kYTKCoreBuildVersion = @"6.2";
 
 static const uintptr_t kYTKRootOptionsGatePrepOffset    = 0x000b91e0;
 static const uintptr_t kYTKFinalSettingsPresenterOffset = 0x000b9120;
@@ -159,9 +159,8 @@ static void preseedLaunchActivationState(NSString *reason) {
     ytk_log(@"launch keychain state reseeded without private calls: %@", reason);
 }
 
-static void preseedFeatureDefaults(void) {
-    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    NSArray<NSString *> *enabledKeys = @[
+static NSArray<NSString *> *ytk_v61AccidentalFeatureDefaultKeys(void) {
+    return @[
         @"kEnableDownloadit",
         @"kEnablePlayInBackgrounds",
         @"kEnableHoldToSeek",
@@ -178,11 +177,21 @@ static void preseedFeatureDefaults(void) {
         @"kEnableNoYTUpdate",
         @"kEnableNoExpirityDownloaded"
     ];
-    for (NSString *key in enabledKeys) {
-        if ([defaults objectForKey:key] == nil) [defaults setBool:YES forKey:key];
+}
+
+static void cleanupV61FeatureDefaultsIfNeeded(void) {
+    NSString *creditKey = @"com.itzzace.ytkelevator.creditPopupVersion";
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    if (![[defaults stringForKey:creditKey] isEqualToString:@"6.1"]) return;
+    int removed = 0;
+    for (NSString *key in ytk_v61AccidentalFeatureDefaultKeys()) {
+        if ([defaults objectForKey:key] != nil) {
+            [defaults removeObjectForKey:key];
+            removed++;
+        }
     }
     [defaults synchronize];
-    ytk_log(@"feature defaults preseeded count=%lu", (unsigned long)enabledKeys.count);
+    ytk_log(@"removed v6.1 accidental feature defaults count=%d", removed);
 }
 
 static void scheduleLaunchReseeds(void) {
@@ -935,8 +944,6 @@ static void ytk_applyRootOptionsVisuals(id self) {
                 labels++;
             }
         } else if ([view isKindOfClass:[UISwitch class]]) {
-            UISwitch *sw = (UISwitch *)view;
-            if (!sw.isOn) [sw setOn:YES animated:NO];
             switches++;
         }
     }
@@ -1055,18 +1062,17 @@ static void ytk_dyldCallback(const struct mach_header *mh, intptr_t slide) {
     if (!strstr(info.dli_fname, "YTKPlus")) return;
     ytk_log(@"YTKPlus image callback path=%s", info.dli_fname);
     preseedLaunchActivationState(@"YTKPlus image callback");
-    preseedFeatureDefaults();
     ytk_patchStartupFeatureGates(@"YTKPlus image callback");
 }
 
 __attribute__((constructor))
 static void init(void) {
     [[NSFileManager defaultManager] removeItemAtPath:ytk_logPath() error:nil];
-    ytk_log(@"boot v6.1-ytkplus-5.7.1 constructor entered");
+    ytk_log(@"boot v6.2-ytkplus-5.7.1 constructor entered");
 
     preseedKeychain();
     ytk_log(@"preseed done");
-    preseedFeatureDefaults();
+    cleanupV61FeatureDefaultsIfNeeded();
     _dyld_register_func_for_add_image(ytk_dyldCallback);
     ytk_patchStartupFeatureGates(@"constructor");
     scheduleLaunchReseeds();
