@@ -1,5 +1,5 @@
 /*
- *  YTKElevator v4.5-ytkplus-5.7.1
+ *  YTKElevator v4.6-ytkplus-5.7.1
  *
  *  Preserves the integrity seal during launch and seeds the YTKPlus 5.7.1
  *  version gate. YTKPlus 5.7.1 rejects 5.7 after the server-side update.
@@ -25,9 +25,8 @@ static NSString *const kYTKVersion  = @"5.7.1";
 static NSString *const kJunkSeal    = @"INVALID-SEAL-FORCE-VERIFY-FAIL";
 static NSString *const kFutureTs    = @"9999999999.000";
 static NSInteger const kYTKDirectSettingsOverlayTag = 0x59544b31;
-static NSString *const kYTKElevatorBuildVersion = @"4.5";
+static NSString *const kYTKElevatorBuildVersion = @"4.6";
 
-static const uintptr_t kYTKDirectOpenSettingsOffset     = 0x000b9120;
 static const uintptr_t kYTKReadKeychainOffset           = 0x000b7a5c;
 static const uintptr_t kYTKHMACOffset                   = 0x000b7f04;
 static const uintptr_t kYTKExpectedGateValueOffset      = 0x000b7e80;
@@ -296,6 +295,8 @@ static void ytk_seedPrivateActivationGate(void) {
     }
 }
 
+static _Thread_local int gPresentDepth = 0;
+
 static void ytk_openYTKSettingsViaGatedPath(id self) {
     if (![self isKindOfClass:[UIViewController class]]) {
         UIViewController *top = ytk_topVC();
@@ -309,29 +310,39 @@ static void ytk_openYTKSettingsViaGatedPath(id self) {
         return;
     }
 
-    void *openPtr = ytk_findYTKPlusAddress(kYTKDirectOpenSettingsOffset);
-    if (!openPtr) {
-        ytk_log(@"gated open failed: direct opener missing");
+    ytk_seedPrivateActivationGate();
+
+    Class rootCls = NSClassFromString(@"RootOptionsController");
+    if (!rootCls) {
+        ytk_log(@"gated open failed: RootOptionsController missing");
         return;
     }
 
-    typedef void (*YTKDirectOpenSettingsFn)(void *);
-    YTKDirectOpenSettingsFn openSettings = (YTKDirectOpenSettingsFn)ytk_authFunctionPointer(openPtr);
+    id root = nil;
+    SEL initWithStyle = @selector(initWithStyle:);
+    if ([rootCls instancesRespondToSelector:initWithStyle]) {
+        root = ((id (*)(id, SEL, NSInteger))objc_msgSend)([rootCls alloc], initWithStyle, 1);
+    } else {
+        root = [[rootCls alloc] init];
+    }
+    if (![root isKindOfClass:[UIViewController class]]) {
+        ytk_log(@"gated open failed: RootOptionsController invalid %@", root ? NSStringFromClass([root class]) : @"nil");
+        return;
+    }
 
-    ytk_log(@"gated open calling direct opener=%p host=%@",
-            openPtr, NSStringFromClass([self class]));
-    ytk_seedPrivateActivationGate();
-    struct {
-        uint8_t padding[0x20];
-        __unsafe_unretained id host;
-    } context = { {0}, self };
-    openSettings(&context);
-    ytk_log(@"gated open returned from YTKPlus opener");
+    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:(UIViewController *)root];
+    nav.modalPresentationStyle = UIModalPresentationFullScreen;
+
+    ytk_log(@"gated open presenting RootOptionsController host=%@", NSStringFromClass([self class]));
+    gPresentDepth++;
+    [(UIViewController *)self presentViewController:nav animated:YES completion:^{
+        ytk_log(@"gated open presented RootOptionsController");
+    }];
+    gPresentDepth--;
 }
 
 
 static void (*orig_presentViewController)(id, SEL, UIViewController *, BOOL, void (^)(void)) = NULL;
-static _Thread_local int gPresentDepth = 0;
 
 static BOOL ytk_isLicenseOptionsAlert(UIViewController *vc) {
     if (![vc isKindOfClass:[UIAlertController class]]) return NO;
@@ -758,7 +769,7 @@ static void ytk_retrySwizzle(int attempt) {
 __attribute__((constructor))
 static void init(void) {
     [[NSFileManager defaultManager] removeItemAtPath:ytk_logPath() error:nil];
-    ytk_log(@"boot v4.5-ytkplus-5.7.1 constructor entered");
+    ytk_log(@"boot v4.6-ytkplus-5.7.1 constructor entered");
 
     preseedKeychain();
     ytk_log(@"preseed done");
