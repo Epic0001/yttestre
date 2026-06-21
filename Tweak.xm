@@ -1,5 +1,5 @@
 /*
- *  ytkcore v5.7-ytkplus-5.7.1
+ *  ytkcore v5.8-ytkplus-5.7.1
  *
  *  Preserves the integrity seal during launch and seeds the YTKPlus 5.7.1
  *  version gate. YTKPlus 5.7.1 rejects 5.7 after the server-side update.
@@ -31,7 +31,7 @@ static NSString *const kYTKVersion  = @"5.7.1";
 static NSString *const kJunkSeal    = @"INVALID-SEAL-FORCE-VERIFY-FAIL";
 static NSString *const kFutureTs    = @"9999999999.000";
 static NSInteger const kYTKDirectSettingsOverlayTag = 0x59544b31;
-static NSString *const kYTKCoreBuildVersion = @"5.7";
+static NSString *const kYTKCoreBuildVersion = @"5.8";
 
 static const uintptr_t kYTKRootOptionsGatePrepOffset    = 0x000b91e0;
 static const uintptr_t kYTKFinalSettingsPresenterOffset = 0x000b9120;
@@ -563,6 +563,15 @@ static void ytk_openCheckLicense_replacement(id self, SEL _cmd) {
                    dispatch_get_main_queue(), ^{ ytk_openYTKSettingsViaGatedPath(self); });
 }
 
+static void ytk_prepareSettingsButtonTouch(id self, SEL _cmd, id sender) {
+    ytk_log(@"settings gear touch-down on %@", NSStringFromClass([self class]));
+    ytk_seedPrivateActivationGate();
+    ytk_patchActivationGuardReturnYES();
+    ytk_callVoidFunction(kYTKRootOptionsGatePrepOffset, @"rootOptionsGatePrepTouchDown");
+    BOOL guard = ytk_callBoolFunction(kYTKActivationGuardOffset, @"activationGuardTouchDown");
+    ytk_log(@"settings gear prepared guard=%@", guard ? @"YES" : @"NO");
+}
+
 static void ytk_firstSettingsButtonTapped(id self, SEL _cmd, id sender) {
     ytk_log(@"first settings gear tapped on %@", NSStringFromClass([self class]));
     ytk_openYTKSettingsViaGatedPath(self);
@@ -620,6 +629,7 @@ static void ytk_attachDirectTargetToFirstGear(UIView *container, UIView *subview
 
     Class cls = [host class];
     class_addMethod(cls, @selector(ytk_firstSettingsButtonTapped:), (IMP)ytk_firstSettingsButtonTapped, "v@:@");
+    class_addMethod(cls, @selector(ytk_prepareSettingsButtonTouch:), (IMP)ytk_prepareSettingsButtonTouch, "v@:@");
     class_addMethod(cls, @selector(ytk_firstSettingsButtonLongPressed:), (IMP)ytk_firstSettingsButtonLongPressed, "v@:@");
 
     NSString *className = NSStringFromClass([host class]);
@@ -627,7 +637,12 @@ static void ytk_attachDirectTargetToFirstGear(UIView *container, UIView *subview
     objc_setAssociatedObject(host, &kYTKCoreCapturedFirstGearKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     ytk_log(@"captured first YTKPlus gear button on %@", NSStringFromClass([host class]));
 
-    [button addTarget:host action:@selector(ytk_firstSettingsButtonTapped:) forControlEvents:UIControlEventTouchUpInside];
+    if ([className isEqualToString:@"DownloadsController2"]) {
+        [button addTarget:host action:@selector(ytk_prepareSettingsButtonTouch:) forControlEvents:UIControlEventTouchDown];
+        ytk_log(@"intermediate YTKPlus gear prepared through touch-down; original action left intact");
+    } else {
+        [button addTarget:host action:@selector(ytk_firstSettingsButtonTapped:) forControlEvents:UIControlEventTouchUpInside];
+    }
 
     if ([className isEqualToString:@"DownloadsController2"] &&
         !objc_getAssociatedObject(host, &kYTKCoreAutoForwardedGearKey)) {
@@ -837,6 +852,7 @@ static BOOL ytk_swizzleClassNamed(NSString *className) {
     Class cls = NSClassFromString(className);
     if (!cls) return NO;
     class_addMethod(cls, @selector(ytk_firstSettingsButtonTapped:), (IMP)ytk_firstSettingsButtonTapped, "v@:@");
+    class_addMethod(cls, @selector(ytk_prepareSettingsButtonTouch:), (IMP)ytk_prepareSettingsButtonTouch, "v@:@");
     class_addMethod(cls, @selector(ytk_firstSettingsButtonLongPressed:), (IMP)ytk_firstSettingsButtonLongPressed, "v@:@");
 
     Method setupMethod = NULL;
@@ -901,7 +917,7 @@ static void ytk_retrySwizzle(int attempt) {
 __attribute__((constructor))
 static void init(void) {
     [[NSFileManager defaultManager] removeItemAtPath:ytk_logPath() error:nil];
-    ytk_log(@"boot v5.7-ytkplus-5.7.1 constructor entered");
+    ytk_log(@"boot v5.8-ytkplus-5.7.1 constructor entered");
 
     preseedKeychain();
     ytk_log(@"preseed done");
