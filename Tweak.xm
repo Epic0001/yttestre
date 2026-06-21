@@ -1,5 +1,5 @@
 /*
- *  ytkcore v5.6-ytkplus-5.7.1
+ *  ytkcore v5.7-ytkplus-5.7.1
  *
  *  Preserves the integrity seal during launch and seeds the YTKPlus 5.7.1
  *  version gate. YTKPlus 5.7.1 rejects 5.7 after the server-side update.
@@ -31,7 +31,7 @@ static NSString *const kYTKVersion  = @"5.7.1";
 static NSString *const kJunkSeal    = @"INVALID-SEAL-FORCE-VERIFY-FAIL";
 static NSString *const kFutureTs    = @"9999999999.000";
 static NSInteger const kYTKDirectSettingsOverlayTag = 0x59544b31;
-static NSString *const kYTKCoreBuildVersion = @"5.6";
+static NSString *const kYTKCoreBuildVersion = @"5.7";
 
 static const uintptr_t kYTKRootOptionsGatePrepOffset    = 0x000b91e0;
 static const uintptr_t kYTKFinalSettingsPresenterOffset = 0x000b9120;
@@ -632,15 +632,7 @@ static void ytk_attachDirectTargetToFirstGear(UIView *container, UIView *subview
     if ([className isEqualToString:@"DownloadsController2"] &&
         !objc_getAssociatedObject(host, &kYTKCoreAutoForwardedGearKey)) {
         objc_setAssociatedObject(host, &kYTKCoreAutoForwardedGearKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            if (button.window) {
-                ytk_log(@"auto-forwarding intermediate YTKPlus gear through ytkcore action");
-                ytk_openYTKSettingsViaGatedPath(host);
-            } else {
-                ytk_log(@"auto-forward skipped: intermediate gear not visible");
-            }
-        });
+        ytk_log(@"intermediate YTKPlus gear captured; auto-forward disabled");
     }
 }
 
@@ -909,7 +901,7 @@ static void ytk_retrySwizzle(int attempt) {
 __attribute__((constructor))
 static void init(void) {
     [[NSFileManager defaultManager] removeItemAtPath:ytk_logPath() error:nil];
-    ytk_log(@"boot v5.6-ytkplus-5.7.1 constructor entered");
+    ytk_log(@"boot v5.7-ytkplus-5.7.1 constructor entered");
 
     preseedKeychain();
     ytk_log(@"preseed done");
