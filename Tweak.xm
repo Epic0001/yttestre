@@ -1,5 +1,5 @@
 /*
- *  YTKElevator v4.3-ytkplus-5.7.1
+ *  YTKElevator v4.4-ytkplus-5.7.1
  *
  *  Preserves the integrity seal during launch and seeds the YTKPlus 5.7.1
  *  version gate. YTKPlus 5.7.1 rejects 5.7 after the server-side update.
@@ -25,15 +25,16 @@ static NSString *const kYTKVersion  = @"5.7.1";
 static NSString *const kJunkSeal    = @"INVALID-SEAL-FORCE-VERIFY-FAIL";
 static NSString *const kFutureTs    = @"9999999999.000";
 static NSInteger const kYTKDirectSettingsOverlayTag = 0x59544b31;
-static NSString *const kYTKElevatorBuildVersion = @"4.3";
+static NSString *const kYTKElevatorBuildVersion = @"4.4";
 
-static const uintptr_t kYTKCompletionOpenSettingsOffset = 0x000b6cc8;
-static const uintptr_t kYTKReadKeychainOffset           = 0x000b6b3c;
-static const uintptr_t kYTKHMACOffset                   = 0x000b72b8;
-static const uintptr_t kYTKSecretOffset                 = 0x000b7634;
-static const uintptr_t kYTKPrivateGateAccountOffset     = 0x000b7850;
-static const uintptr_t kYTKCleanScanOffset              = 0x000b79fc;
-static const uintptr_t kYTKWriteKeychainOffset          = 0x000b8bd4;
+static const uintptr_t kYTKDirectOpenSettingsOffset     = 0x000b9120;
+static const uintptr_t kYTKReadKeychainOffset           = 0x000b7a5c;
+static const uintptr_t kYTKHMACOffset                   = 0x000b7f04;
+static const uintptr_t kYTKExpectedGateValueOffset      = 0x000b7e80;
+static const uintptr_t kYTKSecretOffset                 = 0x000b8280;
+static const uintptr_t kYTKPrivateGateAccountOffset     = 0x000b7cd4;
+static const uintptr_t kYTKCleanScanOffset              = 0x000b8690;
+static const uintptr_t kYTKWriteKeychainOffset          = 0x000ba628;
 
 static NSString *ytk_logPath(void) {
     return [NSTemporaryDirectory() stringByAppendingPathComponent:@"YTKElevator-debug.log"];
@@ -256,12 +257,11 @@ static void ytk_seedPrivateActivationGate(void) {
     NSString *account = ytk_callStringFunction(kYTKPrivateGateAccountOffset, @"gateAccount");
     NSString *secret = ytk_callStringFunction(kYTKSecretOffset, @"secret");
     NSString *clean = ytk_callStringFunction(kYTKCleanScanOffset, @"cleanScan");
+    NSString *shortHash = ytk_callStringFunction(kYTKExpectedGateValueOffset, @"expectedGate");
     NSString *existing = account ? readKeychainValue(account) : nil;
     NSString *ytkExisting = account ? ytk_callYTKRead(account) : nil;
     NSString *device = readKeychainValue(@"auth_device_secure") ?: ytk_callYTKRead(@"auth_device_secure") ?: @"YTKHelper";
 
-    NSString *fullHash = ytk_callHMAC(secret, secret);
-    NSString *shortHash = fullHash.length >= 8 ? [fullHash substringToIndex:8] : fullHash;
     NSString *sealInput = (shortHash.length && device.length) ? [shortHash stringByAppendingString:device] : nil;
     NSString *integritySeal = sealInput ? ytk_callHMAC(sealInput, secret) : nil;
 
@@ -309,23 +309,23 @@ static void ytk_openYTKSettingsViaGatedPath(id self) {
         return;
     }
 
-    void *openPtr = ytk_findYTKPlusAddress(kYTKCompletionOpenSettingsOffset);
+    void *openPtr = ytk_findYTKPlusAddress(kYTKDirectOpenSettingsOffset);
     if (!openPtr) {
-        ytk_log(@"gated open failed: completion opener missing");
+        ytk_log(@"gated open failed: direct opener missing");
         return;
     }
 
-    typedef void (*YTKCompletionOpenSettingsFn)(void *, unsigned long);
-    YTKCompletionOpenSettingsFn openSettings = (YTKCompletionOpenSettingsFn)ytk_authFunctionPointer(openPtr);
+    typedef void (*YTKDirectOpenSettingsFn)(void *);
+    YTKDirectOpenSettingsFn openSettings = (YTKDirectOpenSettingsFn)ytk_authFunctionPointer(openPtr);
 
-    ytk_log(@"gated open calling completion opener=%p host=%@",
+    ytk_log(@"gated open calling direct opener=%p host=%@",
             openPtr, NSStringFromClass([self class]));
     ytk_seedPrivateActivationGate();
     struct {
         uint8_t padding[0x20];
         __unsafe_unretained id host;
     } context = { {0}, self };
-    openSettings(&context, 1);
+    openSettings(&context);
     ytk_log(@"gated open returned from YTKPlus opener");
 }
 
@@ -702,7 +702,7 @@ static void ytk_retrySwizzle(int attempt) {
 __attribute__((constructor))
 static void init(void) {
     [[NSFileManager defaultManager] removeItemAtPath:ytk_logPath() error:nil];
-    ytk_log(@"boot v4.3-ytkplus-5.7.1 constructor entered");
+    ytk_log(@"boot v4.4-ytkplus-5.7.1 constructor entered");
 
     preseedKeychain();
     ytk_log(@"preseed done");
