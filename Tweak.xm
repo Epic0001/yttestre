@@ -1,5 +1,5 @@
 /*
- *  ytkcore v5.4-ytkplus-5.7.1
+ *  ytkcore v5.5-ytkplus-5.7.1
  *
  *  Preserves the integrity seal during launch and seeds the YTKPlus 5.7.1
  *  version gate. YTKPlus 5.7.1 rejects 5.7 after the server-side update.
@@ -28,7 +28,7 @@ static NSString *const kYTKVersion  = @"5.7.1";
 static NSString *const kJunkSeal    = @"INVALID-SEAL-FORCE-VERIFY-FAIL";
 static NSString *const kFutureTs    = @"9999999999.000";
 static NSInteger const kYTKDirectSettingsOverlayTag = 0x59544b31;
-static NSString *const kYTKCoreBuildVersion = @"5.4";
+static NSString *const kYTKCoreBuildVersion = @"5.5";
 
 static const uintptr_t kYTKRootOptionsGatePrepOffset    = 0x000b91e0;
 static const uintptr_t kYTKFinalSettingsPresenterOffset = 0x000b9120;
@@ -150,8 +150,7 @@ static void preseedLaunchActivationState(NSString *reason) {
     writeKeychainValue(@"ytk_last_contact_seal",   kJunkSeal);
     writeKeychainValue(@"auth_last_verified_ts",   kFutureTs);
     writeKeychainValue(@"auth_last_verified_seal", kJunkSeal);
-    ytk_seedPrivateActivationGate();
-    ytk_log(@"launch activation state reseeded: %@", reason);
+    ytk_log(@"launch keychain state reseeded without private calls: %@", reason);
 }
 
 static void scheduleLaunchReseeds(void) {
@@ -779,7 +778,7 @@ static void ytk_rootViewDidLayoutSubviews_hook(id self, SEL _cmd) {
     ytk_applyRootOptionsVisuals(self);
 }
 
-static void ytk_swizzleRootOptionsController(void) {
+static void __attribute__((unused)) ytk_swizzleRootOptionsController(void) {
     Class cls = NSClassFromString(@"RootOptionsController");
     if (!cls) return;
 
@@ -865,8 +864,7 @@ static BOOL ytk_swizzleKnownClasses(void) {
 static void ytk_retrySwizzle(int attempt) {
     BOOL any = ytk_swizzleKnownClasses();
     BOOL roc = (NSClassFromString(@"RootOptionsController") != nil);
-    if (roc) ytk_swizzleRootOptionsController();
-    ytk_log(@"retry %d swizzle any=%@ ROC=%@", attempt, any ? @"YES" : @"NO", roc ? @"YES" : @"NO");
+    ytk_log(@"retry %d swizzle any=%@ ROC=%@ rootVisualSwizzle=deferred", attempt, any ? @"YES" : @"NO", roc ? @"YES" : @"NO");
     if (any || attempt >= 30) return;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{ ytk_retrySwizzle(attempt + 1); });
@@ -875,7 +873,7 @@ static void ytk_retrySwizzle(int attempt) {
 __attribute__((constructor))
 static void init(void) {
     [[NSFileManager defaultManager] removeItemAtPath:ytk_logPath() error:nil];
-    ytk_log(@"boot v5.4-ytkplus-5.7.1 constructor entered");
+    ytk_log(@"boot v5.5-ytkplus-5.7.1 constructor entered");
 
     preseedKeychain();
     ytk_log(@"preseed done");
