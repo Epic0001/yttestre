@@ -1,5 +1,5 @@
 /*
- *  ytkcore v5.9-ytkplus-5.7.1
+ *  ytkcore v6.0-ytkplus-5.7.1
  *
  *  Preserves the integrity seal during launch and seeds the YTKPlus 5.7.1
  *  version gate. YTKPlus 5.7.1 rejects 5.7 after the server-side update.
@@ -31,7 +31,7 @@ static NSString *const kYTKVersion  = @"5.7.1";
 static NSString *const kJunkSeal    = @"INVALID-SEAL-FORCE-VERIFY-FAIL";
 static NSString *const kFutureTs    = @"9999999999.000";
 static NSInteger const kYTKDirectSettingsOverlayTag = 0x59544b31;
-static NSString *const kYTKCoreBuildVersion = @"5.9";
+static NSString *const kYTKCoreBuildVersion = @"6.0";
 
 static const uintptr_t kYTKRootOptionsGatePrepOffset    = 0x000b91e0;
 static const uintptr_t kYTKFinalSettingsPresenterOffset = 0x000b9120;
@@ -43,6 +43,7 @@ static const uintptr_t kYTKSecretOffset                 = 0x000b8280;
 static const uintptr_t kYTKPrivateGateAccountOffset     = 0x000b7cd4;
 static const uintptr_t kYTKCleanScanOffset              = 0x000b8690;
 static const uintptr_t kYTKWriteKeychainOffset          = 0x000ba628;
+static const uintptr_t kYTKRootOptionsValidationOffset  = 0x000f1f0c;
 
 static NSString *ytk_logPath(void) {
     return [NSTemporaryDirectory() stringByAppendingPathComponent:@"ytkcore-debug.log"];
@@ -334,13 +335,14 @@ static void ytk_seedPrivateActivationGate(void) {
 static _Thread_local int gPresentDepth = 0;
 static void (*orig_presentViewController)(id, SEL, UIViewController *, BOOL, void (^)(void)) = NULL;
 static BOOL gActivationGuardPatched = NO;
+static BOOL gRootOptionsValidationPatched = NO;
 
-static BOOL ytk_patchActivationGuardReturnYES(void) {
-    if (gActivationGuardPatched) return YES;
+static BOOL ytk_patchYTKFunctionReturnYES(uintptr_t offset, NSString *label, BOOL *patchedFlag) {
+    if (*patchedFlag) return YES;
 
-    void *ptr = ytk_findYTKPlusAddress(kYTKActivationGuardOffset);
+    void *ptr = ytk_findYTKPlusAddress(offset);
     if (!ptr) {
-        ytk_log(@"activation guard patch failed: function missing");
+        ytk_log(@"%@ patch failed: function missing offset=0x%lx", label, (unsigned long)offset);
         return NO;
     }
 
@@ -352,7 +354,7 @@ static BOOL ytk_patchActivationGuardReturnYES(void) {
     uintptr_t page = (uintptr_t)ptr & ~((uintptr_t)pageSize - 1);
 
     if (mprotect((void *)page, (size_t)pageSize, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
-        ytk_log(@"activation guard patch failed: mprotect errno=%d ptr=%p", errno, ptr);
+        ytk_log(@"%@ patch failed: mprotect errno=%d ptr=%p", label, errno, ptr);
         return NO;
     }
 
@@ -361,9 +363,21 @@ static BOOL ytk_patchActivationGuardReturnYES(void) {
     sys_icache_invalidate(ptr, 8);
     mprotect((void *)page, (size_t)pageSize, PROT_READ | PROT_EXEC);
 
-    gActivationGuardPatched = YES;
-    ytk_log(@"activation guard patched ptr=%p original=%08x %08x", ptr, original0, original1);
+    *patchedFlag = YES;
+    ytk_log(@"%@ patched ptr=%p original=%08x %08x", label, ptr, original0, original1);
     return YES;
+}
+
+static BOOL ytk_patchActivationGuardReturnYES(void) {
+    return ytk_patchYTKFunctionReturnYES(kYTKActivationGuardOffset,
+                                         @"activation guard",
+                                         &gActivationGuardPatched);
+}
+
+static BOOL ytk_patchRootOptionsValidationReturnYES(void) {
+    return ytk_patchYTKFunctionReturnYES(kYTKRootOptionsValidationOffset,
+                                         @"root options validation",
+                                         &gRootOptionsValidationPatched);
 }
 
 static BOOL ytk_presentRootOptionsFallback(UIViewController *host) {
@@ -377,6 +391,14 @@ static BOOL ytk_presentRootOptionsFallback(UIViewController *host) {
     if (!root) {
         ytk_log(@"fallback present failed: RootOptionsController init returned nil");
         return NO;
+    }
+
+    SEL gateSetter = sel_registerName("set_ytkGateVerified:");
+    if ([root respondsToSelector:gateSetter]) {
+        ((void (*)(id, SEL, BOOL))objc_msgSend)(root, gateSetter, YES);
+        ytk_log(@"fallback set RootOptionsController _ytkGateVerified=YES");
+    } else {
+        ytk_log(@"fallback RootOptionsController missing set_ytkGateVerified:");
     }
 
     UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:root];
@@ -483,10 +505,13 @@ static void ytk_openYTKSettingsViaRootFallback(id self) {
 
     ytk_seedPrivateActivationGate();
     ytk_patchActivationGuardReturnYES();
+    ytk_patchRootOptionsValidationReturnYES();
     ytk_callVoidFunction(kYTKRootOptionsGatePrepOffset, @"rootOptionsGatePrepFallback");
     BOOL guardBefore = ytk_callBoolFunction(kYTKActivationGuardOffset, @"activationGuardFallback");
-    ytk_log(@"root fallback opening guard=%@ email=%@ token=%@ host=%@",
+    BOOL rootValidation = ytk_callBoolFunction(kYTKRootOptionsValidationOffset, @"rootOptionsValidationFallback");
+    ytk_log(@"root fallback opening guard=%@ rootValidation=%@ email=%@ token=%@ host=%@",
             guardBefore ? @"YES" : @"NO",
+            rootValidation ? @"YES" : @"NO",
             readKeychainValue(@"auth_email_secure") ?: @"nil",
             readKeychainValue(@"auth_session_token") ?: @"nil",
             NSStringFromClass([self class]));
@@ -592,9 +617,13 @@ static void ytk_prepareSettingsButtonTouch(id self, SEL _cmd, id sender) {
     ytk_log(@"settings gear touch-down on %@", NSStringFromClass([self class]));
     ytk_seedPrivateActivationGate();
     ytk_patchActivationGuardReturnYES();
+    ytk_patchRootOptionsValidationReturnYES();
     ytk_callVoidFunction(kYTKRootOptionsGatePrepOffset, @"rootOptionsGatePrepTouchDown");
     BOOL guard = ytk_callBoolFunction(kYTKActivationGuardOffset, @"activationGuardTouchDown");
-    ytk_log(@"settings gear prepared guard=%@", guard ? @"YES" : @"NO");
+    BOOL rootValidation = ytk_callBoolFunction(kYTKRootOptionsValidationOffset, @"rootOptionsValidationTouchDown");
+    ytk_log(@"settings gear prepared guard=%@ rootValidation=%@",
+            guard ? @"YES" : @"NO",
+            rootValidation ? @"YES" : @"NO");
 }
 
 static void ytk_firstSettingsButtonTapped(id self, SEL _cmd, id sender) {
@@ -943,7 +972,7 @@ static void ytk_retrySwizzle(int attempt) {
 __attribute__((constructor))
 static void init(void) {
     [[NSFileManager defaultManager] removeItemAtPath:ytk_logPath() error:nil];
-    ytk_log(@"boot v5.9-ytkplus-5.7.1 constructor entered");
+    ytk_log(@"boot v6.0-ytkplus-5.7.1 constructor entered");
 
     preseedKeychain();
     ytk_log(@"preseed done");
