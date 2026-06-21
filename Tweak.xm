@@ -1,5 +1,5 @@
 /*
- *  YTKElevator v4.6-ytkplus-5.7.1
+ *  YTKElevator v4.7-ytkplus-5.7.1
  *
  *  Preserves the integrity seal during launch and seeds the YTKPlus 5.7.1
  *  version gate. YTKPlus 5.7.1 rejects 5.7 after the server-side update.
@@ -25,8 +25,9 @@ static NSString *const kYTKVersion  = @"5.7.1";
 static NSString *const kJunkSeal    = @"INVALID-SEAL-FORCE-VERIFY-FAIL";
 static NSString *const kFutureTs    = @"9999999999.000";
 static NSInteger const kYTKDirectSettingsOverlayTag = 0x59544b31;
-static NSString *const kYTKElevatorBuildVersion = @"4.6";
+static NSString *const kYTKElevatorBuildVersion = @"4.7";
 
+static const uintptr_t kYTKRootOptionsGatePrepOffset    = 0x000b91e0;
 static const uintptr_t kYTKReadKeychainOffset           = 0x000b7a5c;
 static const uintptr_t kYTKHMACOffset                   = 0x000b7f04;
 static const uintptr_t kYTKExpectedGateValueOffset      = 0x000b7e80;
@@ -224,6 +225,17 @@ static NSString *ytk_callStringFunction(uintptr_t offset, NSString *name) {
     return value;
 }
 
+static void ytk_callVoidFunction(uintptr_t offset, NSString *name) {
+    void *ptr = ytk_findYTKPlusAddress(offset);
+    if (!ptr) {
+        ytk_log(@"private %@ missing at offset 0x%lx", name, (unsigned long)offset);
+        return;
+    }
+    typedef void (*YTKVoidFn)(void);
+    YTKVoidFn fn = (YTKVoidFn)ytk_authFunctionPointer(ptr);
+    fn();
+}
+
 static NSString *ytk_callHMAC(NSString *data, NSString *key) {
     void *ptr = ytk_findYTKPlusAddress(kYTKHMACOffset);
     if (!ptr || !data || !key) return nil;
@@ -311,6 +323,7 @@ static void ytk_openYTKSettingsViaGatedPath(id self) {
     }
 
     ytk_seedPrivateActivationGate();
+    ytk_callVoidFunction(kYTKRootOptionsGatePrepOffset, @"rootOptionsGatePrep");
 
     Class rootCls = NSClassFromString(@"RootOptionsController");
     if (!rootCls) {
@@ -333,7 +346,8 @@ static void ytk_openYTKSettingsViaGatedPath(id self) {
     UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:(UIViewController *)root];
     nav.modalPresentationStyle = UIModalPresentationFullScreen;
 
-    ytk_log(@"gated open presenting RootOptionsController host=%@", NSStringFromClass([self class]));
+    ytk_log(@"gated open presenting RootOptionsController host=%@ gatePrep=0x%lx",
+            NSStringFromClass([self class]), (unsigned long)kYTKRootOptionsGatePrepOffset);
     gPresentDepth++;
     [(UIViewController *)self presentViewController:nav animated:YES completion:^{
         ytk_log(@"gated open presented RootOptionsController");
@@ -769,7 +783,7 @@ static void ytk_retrySwizzle(int attempt) {
 __attribute__((constructor))
 static void init(void) {
     [[NSFileManager defaultManager] removeItemAtPath:ytk_logPath() error:nil];
-    ytk_log(@"boot v4.6-ytkplus-5.7.1 constructor entered");
+    ytk_log(@"boot v4.7-ytkplus-5.7.1 constructor entered");
 
     preseedKeychain();
     ytk_log(@"preseed done");
