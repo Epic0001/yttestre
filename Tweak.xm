@@ -1,5 +1,5 @@
 /*
- *  YTKCore v4.2-ytkplus-5.7.1
+ *  YTKElevator v4.3-ytkplus-5.7.1
  *
  *  Preserves the integrity seal during launch and seeds the YTKPlus 5.7.1
  *  version gate. YTKPlus 5.7.1 rejects 5.7 after the server-side update.
@@ -17,7 +17,7 @@
 #import <ptrauth.h>
 #endif
 
-#define LOG(fmt, ...) NSLog(@"[YTKCore] " fmt, ##__VA_ARGS__)
+#define LOG(fmt, ...) NSLog(@"[YTKElevator] " fmt, ##__VA_ARGS__)
 
 static NSString *const kService     = @"me.ikghd.ytkplus.secure";
 static NSString *const kFakeLicense = @"ACTIVATED-0000-0000";
@@ -25,7 +25,7 @@ static NSString *const kYTKVersion  = @"5.7.1";
 static NSString *const kJunkSeal    = @"INVALID-SEAL-FORCE-VERIFY-FAIL";
 static NSString *const kFutureTs    = @"9999999999.000";
 static NSInteger const kYTKDirectSettingsOverlayTag = 0x59544b31;
-static NSString *const kYTKCoreBuildVersion = @"4.2";
+static NSString *const kYTKElevatorBuildVersion = @"4.3";
 
 static const uintptr_t kYTKCompletionOpenSettingsOffset = 0x000b6cc8;
 static const uintptr_t kYTKReadKeychainOffset           = 0x000b6b3c;
@@ -36,7 +36,7 @@ static const uintptr_t kYTKCleanScanOffset              = 0x000b79fc;
 static const uintptr_t kYTKWriteKeychainOffset          = 0x000b8bd4;
 
 static NSString *ytk_logPath(void) {
-    return [NSTemporaryDirectory() stringByAppendingPathComponent:@"YTKCore-debug.log"];
+    return [NSTemporaryDirectory() stringByAppendingPathComponent:@"YTKElevator-debug.log"];
 }
 
 static void ytk_log(NSString *fmt, ...) {
@@ -388,10 +388,10 @@ static void ytk_installPresentInterceptor(void) {
 }
 
 static void ytk_showCreditPopupIfNeeded(void) {
-    NSString *key = @"com.itzzace.ytkcore.creditPopupVersion";
+    NSString *key = @"com.itzzace.ytkelevator.creditPopupVersion";
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    if ([[defaults stringForKey:key] isEqualToString:kYTKCoreBuildVersion]) return;
-    [defaults setObject:kYTKCoreBuildVersion forKey:key];
+    if ([[defaults stringForKey:key] isEqualToString:kYTKElevatorBuildVersion]) return;
+    [defaults setObject:kYTKElevatorBuildVersion forKey:key];
     [defaults synchronize];
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)),
@@ -402,7 +402,7 @@ static void ytk_showCreditPopupIfNeeded(void) {
             return;
         }
         UIAlertController *alert = [UIAlertController
-            alertControllerWithTitle:@"YTKCore"
+            alertControllerWithTitle:@"YTKElevator"
             message:@"YTKPlus activated by itzzace."
             preferredStyle:UIAlertControllerStyleAlert];
         [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleCancel handler:nil]];
@@ -702,7 +702,7 @@ static void ytk_retrySwizzle(int attempt) {
 __attribute__((constructor))
 static void init(void) {
     [[NSFileManager defaultManager] removeItemAtPath:ytk_logPath() error:nil];
-    ytk_log(@"boot v4.2-ytkplus-5.7.1 constructor entered");
+    ytk_log(@"boot v4.3-ytkplus-5.7.1 constructor entered");
 
     preseedKeychain();
     ytk_log(@"preseed done");
