@@ -1,5 +1,5 @@
 /*
- *  ytkcore v5.1-ytkplus-5.7.1
+ *  ytkcore v5.2-ytkplus-5.7.1
  *
  *  Preserves the integrity seal during launch and seeds the YTKPlus 5.7.1
  *  version gate. YTKPlus 5.7.1 rejects 5.7 after the server-side update.
@@ -22,11 +22,13 @@
 static NSString *const kService     = @"me.ikghd.ytkplus.secure";
 static NSString *const kFakeLicense = @"ACTIVATED-0000-0000";
 static NSString *const kFakeEmail   = @"activated@itzzace.dev";
+static NSString *const kFakeDevice  = @"ytkcore";
+static NSString *const kFakeToken   = @"core-session-token";
 static NSString *const kYTKVersion  = @"5.7.1";
 static NSString *const kJunkSeal    = @"INVALID-SEAL-FORCE-VERIFY-FAIL";
 static NSString *const kFutureTs    = @"9999999999.000";
 static NSInteger const kYTKDirectSettingsOverlayTag = 0x59544b31;
-static NSString *const kYTKCoreBuildVersion = @"5.1";
+static NSString *const kYTKCoreBuildVersion = @"5.2";
 
 static const uintptr_t kYTKRootOptionsGatePrepOffset    = 0x000b91e0;
 static const uintptr_t kYTKFinalSettingsPresenterOffset = 0x000b9120;
@@ -105,9 +107,9 @@ static void preseedKeychain(void) {
 
     writeKeychainValue(@"auth_email_secure",    kFakeEmail);
     writeKeychainValue(@"auth_license_secure",  kFakeLicense);
-    writeKeychainValue(@"auth_device_secure",   @"YTKHelper");
+    writeKeychainValue(@"auth_device_secure",   kFakeDevice);
     writeKeychainValue(@"auth_expires_secure",  @"01-01-2030 12:00 AM");
-    writeKeychainValue(@"auth_session_token",   @"YTKHelper-Token");
+    writeKeychainValue(@"auth_session_token",   kFakeToken);
     writeKeychainValue(@"auth_timestamp",       @"9999999999");
 
     writeKeychainValue(@"activation_logged_for_key", kFakeLicense);
@@ -132,9 +134,9 @@ static void preseedLaunchActivationState(NSString *reason) {
 
     writeKeychainValue(@"auth_email_secure",    kFakeEmail);
     writeKeychainValue(@"auth_license_secure",  kFakeLicense);
-    writeKeychainValue(@"auth_device_secure",   @"YTKHelper");
+    writeKeychainValue(@"auth_device_secure",   kFakeDevice);
     writeKeychainValue(@"auth_expires_secure",  @"01-01-2030 12:00 AM");
-    writeKeychainValue(@"auth_session_token",   @"YTKHelper-Token");
+    writeKeychainValue(@"auth_session_token",   kFakeToken);
     writeKeychainValue(@"auth_timestamp",       @"9999999999");
 
     writeKeychainValue(@"activation_logged_for_key", kFakeLicense);
@@ -285,7 +287,7 @@ static void ytk_seedPrivateActivationGate(void) {
     NSString *shortHash = ytk_callStringFunction(kYTKExpectedGateValueOffset, @"expectedGate");
     NSString *existing = account ? readKeychainValue(account) : nil;
     NSString *ytkExisting = account ? ytk_callYTKRead(account) : nil;
-    NSString *device = readKeychainValue(@"auth_device_secure") ?: ytk_callYTKRead(@"auth_device_secure") ?: @"YTKHelper";
+    NSString *device = readKeychainValue(@"auth_device_secure") ?: ytk_callYTKRead(@"auth_device_secure") ?: kFakeDevice;
 
     NSString *sealInput = (shortHash.length && device.length) ? [shortHash stringByAppendingString:device] : nil;
     NSString *integritySeal = sealInput ? ytk_callHMAC(sealInput, secret) : nil;
@@ -404,12 +406,16 @@ static void ytk_openYTKSettingsViaGatedPath(id self) {
     gPresentDepth--;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
+        UIViewController *hostVC = [self isKindOfClass:[UIViewController class]] ? (UIViewController *)self : nil;
+        UIViewController *presented = hostVC.presentedViewController;
         UIViewController *top = ytk_topVC();
         NSString *topName = top ? NSStringFromClass([top class]) : @"nil";
-        BOOL presentedSettings = [top isKindOfClass:NSClassFromString(@"UINavigationController")] ||
+        NSString *presentedName = presented ? NSStringFromClass([presented class]) : @"nil";
+        BOOL presentedSettings = [presentedName containsString:@"UINavigationController"] ||
+                                 [presentedName containsString:@"RootOptionsController"] ||
                                  [topName containsString:@"RootOptionsController"];
-        ytk_log(@"gated open returned from YTKPlus final presenter top=%@ presented=%@",
-                topName, presentedSettings ? @"YES" : @"NO");
+        ytk_log(@"gated open returned from YTKPlus final presenter top=%@ hostPresented=%@ presented=%@",
+                topName, presentedName, presentedSettings ? @"YES" : @"NO");
         if (!presentedSettings && [self isKindOfClass:[UIViewController class]]) {
             ytk_callVoidFunction(kYTKRootOptionsGatePrepOffset, @"rootOptionsGatePrepFallback");
             BOOL guardAfter = ytk_callBoolFunction(kYTKActivationGuardOffset, @"activationGuardFallback");
@@ -861,7 +867,7 @@ static void ytk_retrySwizzle(int attempt) {
 __attribute__((constructor))
 static void init(void) {
     [[NSFileManager defaultManager] removeItemAtPath:ytk_logPath() error:nil];
-    ytk_log(@"boot v5.1-ytkplus-5.7.1 constructor entered");
+    ytk_log(@"boot v5.2-ytkplus-5.7.1 constructor entered");
 
     preseedKeychain();
     ytk_log(@"preseed done");
