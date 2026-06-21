@@ -1,5 +1,5 @@
 /*
- *  ytkcore v6.2-ytkplus-5.7.1
+ *  ytkcore v6.3-ytkplus-5.7.1
  *
  *  Preserves the integrity seal during launch and seeds the YTKPlus 5.7.1
  *  version gate. YTKPlus 5.7.1 rejects 5.7 after the server-side update.
@@ -32,7 +32,7 @@ static NSString *const kYTKVersion  = @"5.7.1";
 static NSString *const kJunkSeal    = @"INVALID-SEAL-FORCE-VERIFY-FAIL";
 static NSString *const kFutureTs    = @"9999999999.000";
 static NSInteger const kYTKDirectSettingsOverlayTag = 0x59544b31;
-static NSString *const kYTKCoreBuildVersion = @"6.2";
+static NSString *const kYTKCoreBuildVersion = @"6.3";
 
 static const uintptr_t kYTKRootOptionsGatePrepOffset    = 0x000b91e0;
 static const uintptr_t kYTKFinalSettingsPresenterOffset = 0x000b9120;
@@ -194,12 +194,66 @@ static void cleanupV61FeatureDefaultsIfNeeded(void) {
     ytk_log(@"removed v6.1 accidental feature defaults count=%d", removed);
 }
 
+static NSString *ytk_describePrefValue(id value) {
+    if (!value || value == (id)kCFNull) return @"nil";
+    if ([value isKindOfClass:[NSNumber class]]) {
+        return [NSString stringWithFormat:@"%@/%@", [value boolValue] ? @"YES" : @"NO", value];
+    }
+    if ([value isKindOfClass:[NSString class]]) return value;
+    return [NSString stringWithFormat:@"%@:%@", NSStringFromClass([value class]), value];
+}
+
+static void ytk_logFeaturePrefs(NSString *reason) {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    NSDictionary *ytkPlus = [defaults dictionaryForKey:@"YTKPlus"];
+    NSArray<NSString *> *plainKeys = @[
+        @"kEnableOldDarkTheme",
+        @"kEnableDownloadit",
+        @"kEnableYTKPiP",
+        @"kEnableisSpeed",
+        @"kEnablePlayInBackgrounds",
+        @"kEnableYTKLoop",
+        @"kEnableNoAds",
+        @"kEnableShowMediaController",
+        @"vlcGesturesDisabled",
+        @"videoAutoPlayEnabled"
+    ];
+    NSArray<NSString *> *nestedKeys = @[
+        @"kEnableHoldToSeek",
+        @"kSeekDuration",
+        @"kVolumeSide",
+        @"kBrightnessSide",
+        @"sponsorBlock",
+        @"autoSkipShorts"
+    ];
+
+    NSMutableArray<NSString *> *parts = [NSMutableArray array];
+    for (NSString *key in plainKeys) {
+        [parts addObject:[NSString stringWithFormat:@"%@=%@",
+                          key,
+                          ytk_describePrefValue([defaults objectForKey:key])]];
+    }
+    ytk_log(@"feature prefs plain reason=%@ %@", reason ?: @"nil", [parts componentsJoinedByString:@" "]);
+
+    [parts removeAllObjects];
+    for (NSString *key in nestedKeys) {
+        [parts addObject:[NSString stringWithFormat:@"YTKPlus.%@=%@",
+                          key,
+                          ytk_describePrefValue(ytkPlus[key])]];
+    }
+    ytk_log(@"feature prefs nested reason=%@ dict=%@ %@",
+            reason ?: @"nil",
+            ytkPlus ? @"present" : @"nil",
+            [parts componentsJoinedByString:@" "]);
+}
+
 static void scheduleLaunchReseeds(void) {
     NSArray<NSNumber *> *delays = @[ @0.25, @1.0, @3.0, @8.0 ];
     for (NSNumber *delay in delays) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay.doubleValue * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             preseedLaunchActivationState([NSString stringWithFormat:@"launch +%.2fs", delay.doubleValue]);
+            ytk_logFeaturePrefs([NSString stringWithFormat:@"launch +%.2fs", delay.doubleValue]);
         });
     }
 
@@ -208,6 +262,7 @@ static void scheduleLaunchReseeds(void) {
                                                        queue:[NSOperationQueue mainQueue]
                                                   usingBlock:^(__unused NSNotification *note) {
         preseedLaunchActivationState(@"app became active");
+        ytk_logFeaturePrefs(@"app became active");
     }];
 }
 
@@ -469,6 +524,7 @@ static void ytk_patchStartupFeatureGates(NSString *reason) {
 }
 
 static BOOL ytk_presentRootOptionsFallback(UIViewController *host) {
+    ytk_logFeaturePrefs(@"before root fallback present");
     Class rootClass = NSClassFromString(@"RootOptionsController");
     if (!rootClass) {
         ytk_log(@"fallback present failed: RootOptionsController missing");
@@ -528,6 +584,7 @@ static void ytk_openYTKSettingsViaGatedPath(id self) {
     }
 
     ytk_seedPrivateActivationGate();
+    ytk_logFeaturePrefs(@"before gated settings open");
     ytk_patchActivationGuardReturnYES();
     ytk_callVoidFunction(kYTKRootOptionsGatePrepOffset, @"rootOptionsGatePrep");
     BOOL guardBefore = ytk_callBoolFunction(kYTKActivationGuardOffset, @"activationGuard");
@@ -592,6 +649,7 @@ static void ytk_openYTKSettingsViaRootFallback(id self) {
     }
 
     ytk_seedPrivateActivationGate();
+    ytk_logFeaturePrefs(@"before root settings open");
     ytk_patchActivationGuardReturnYES();
     ytk_patchRootOptionsValidationReturnYES();
     ytk_callVoidFunction(kYTKRootOptionsGatePrepOffset, @"rootOptionsGatePrepFallback");
@@ -716,6 +774,7 @@ static void ytk_prepareSettingsButtonTouch(id self, SEL _cmd, id sender) {
 
 static void ytk_firstSettingsButtonTapped(id self, SEL _cmd, id sender) {
     ytk_log(@"first settings gear tapped on %@", NSStringFromClass([self class]));
+    ytk_logFeaturePrefs(@"first settings gear tapped");
     ytk_openYTKSettingsViaRootFallback(self);
 }
 
@@ -927,6 +986,7 @@ static void ytk_downloadsViewDidLayoutSubviews_hook(id self, SEL _cmd) {
 
 static void ytk_applyRootOptionsVisuals(id self) {
     if (![self isKindOfClass:[UIViewController class]]) return;
+    ytk_logFeaturePrefs(@"root options visuals");
     UIViewController *vc = (UIViewController *)self;
     int labels = 0;
     int switches = 0;
@@ -1068,11 +1128,12 @@ static void ytk_dyldCallback(const struct mach_header *mh, intptr_t slide) {
 __attribute__((constructor))
 static void init(void) {
     [[NSFileManager defaultManager] removeItemAtPath:ytk_logPath() error:nil];
-    ytk_log(@"boot v6.2-ytkplus-5.7.1 constructor entered");
+    ytk_log(@"boot v6.3-ytkplus-5.7.1 constructor entered");
 
     preseedKeychain();
     ytk_log(@"preseed done");
     cleanupV61FeatureDefaultsIfNeeded();
+    ytk_logFeaturePrefs(@"constructor after cleanup");
     _dyld_register_func_for_add_image(ytk_dyldCallback);
     ytk_patchStartupFeatureGates(@"constructor");
     scheduleLaunchReseeds();
