@@ -1,5 +1,5 @@
 /*
- *  ytkcore v6.6-ytkplus-5.7.1
+ *  ytkcore v6.7-ytkplus-5.7.1
  *
  *  Preserves the integrity seal during launch and seeds the YTKPlus 5.7.1
  *  version gate. YTKPlus 5.7.1 rejects 5.7 after the server-side update.
@@ -32,7 +32,7 @@ static NSString *const kYTKVersion  = @"5.7.1";
 static NSString *const kJunkSeal    = @"INVALID-SEAL-FORCE-VERIFY-FAIL";
 static NSString *const kFutureTs    = @"9999999999.000";
 static NSInteger const kYTKDirectSettingsOverlayTag = 0x59544b31;
-static NSString *const kYTKCoreBuildVersion = @"6.6";
+static NSString *const kYTKCoreBuildVersion = @"6.7";
 
 static const uintptr_t kYTKRootOptionsGatePrepOffset    = 0x000b91e0;
 static const uintptr_t kYTKFinalSettingsPresenterOffset = 0x000b9120;
@@ -51,6 +51,29 @@ static const uintptr_t kYTKAdsFeatureGateOffset         = 0x0000c2f4;
 
 static NSString *ytk_logPath(void) {
     return [NSTemporaryDirectory() stringByAppendingPathComponent:@"ytkcore-debug.log"];
+}
+
+static BOOL ytk_isJailbrokenRuntime(void) {
+    static dispatch_once_t onceToken;
+    static BOOL isJailbroken = NO;
+    dispatch_once(&onceToken, ^{
+        NSFileManager *fm = [NSFileManager defaultManager];
+        NSArray<NSString *> *paths = @[
+            @"/var/jb",
+            @"/var/jb/usr/bin/oslog",
+            @"/Library/MobileSubstrate/MobileSubstrate.dylib",
+            @"/usr/lib/substrate",
+            @"/Applications/Sileo.app",
+            @"/Applications/Zebra.app"
+        ];
+        for (NSString *path in paths) {
+            if ([fm fileExistsAtPath:path]) {
+                isJailbroken = YES;
+                break;
+            }
+        }
+    });
+    return isJailbroken;
 }
 
 static void ytk_log(NSString *fmt, ...) {
@@ -432,6 +455,10 @@ static void ytk_callYTKWrite(NSString *account, NSString *value) {
 }
 
 static void ytk_seedPrivateActivationGate(void) {
+    if (!ytk_isJailbrokenRuntime()) {
+        ytk_log(@"private gate seed skipped: non-jailbroken runtime");
+        return;
+    }
     NSString *account = ytk_callStringFunction(kYTKPrivateGateAccountOffset, @"gateAccount");
     NSString *secret = ytk_callStringFunction(kYTKSecretOffset, @"secret");
     NSString *clean = ytk_callStringFunction(kYTKCleanScanOffset, @"cleanScan");
@@ -493,6 +520,12 @@ static BOOL ytk_patchYTKInstruction(uintptr_t offset,
                                     NSString *label,
                                     BOOL *patchedFlag) {
     if (*patchedFlag) return YES;
+    if (!ytk_isJailbrokenRuntime()) {
+        ytk_log(@"%@ patch skipped: non-jailbroken runtime offset=0x%lx",
+                label,
+                (unsigned long)offset);
+        return NO;
+    }
 
     void *ptr = ytk_findYTKPlusAddress(offset);
     if (!ptr) {
@@ -522,6 +555,12 @@ static BOOL ytk_patchYTKInstruction(uintptr_t offset,
 
 static BOOL ytk_patchYTKFunctionReturnYES(uintptr_t offset, NSString *label, BOOL *patchedFlag) {
     if (*patchedFlag) return YES;
+    if (!ytk_isJailbrokenRuntime()) {
+        ytk_log(@"%@ patch skipped: non-jailbroken runtime offset=0x%lx",
+                label,
+                (unsigned long)offset);
+        return NO;
+    }
 
     void *ptr = ytk_findYTKPlusAddress(offset);
     if (!ptr) {
@@ -1208,7 +1247,8 @@ static void ytk_dyldCallback(const struct mach_header *mh, intptr_t slide) {
 __attribute__((constructor))
 static void init(void) {
     [[NSFileManager defaultManager] removeItemAtPath:ytk_logPath() error:nil];
-    ytk_log(@"boot v6.6-ytkplus-5.7.1 constructor entered");
+    ytk_log(@"boot v6.7-ytkplus-5.7.1 constructor entered runtime=%@",
+            ytk_isJailbrokenRuntime() ? @"jailbroken" : @"non-jailbroken");
 
     preseedKeychain();
     ytk_log(@"preseed done");
