@@ -1,5 +1,5 @@
 /*
- *  ytkcore v6.5-ytkplus-5.7.1
+ *  ytkcore v6.6-ytkplus-5.7.1
  *
  *  Preserves the integrity seal during launch and seeds the YTKPlus 5.7.1
  *  version gate. YTKPlus 5.7.1 rejects 5.7 after the server-side update.
@@ -32,7 +32,7 @@ static NSString *const kYTKVersion  = @"5.7.1";
 static NSString *const kJunkSeal    = @"INVALID-SEAL-FORCE-VERIFY-FAIL";
 static NSString *const kFutureTs    = @"9999999999.000";
 static NSInteger const kYTKDirectSettingsOverlayTag = 0x59544b31;
-static NSString *const kYTKCoreBuildVersion = @"6.5";
+static NSString *const kYTKCoreBuildVersion = @"6.6";
 
 static const uintptr_t kYTKRootOptionsGatePrepOffset    = 0x000b91e0;
 static const uintptr_t kYTKFinalSettingsPresenterOffset = 0x000b9120;
@@ -47,12 +47,7 @@ static const uintptr_t kYTKWriteKeychainOffset          = 0x000ba628;
 static const uintptr_t kYTKRootOptionsValidationOffset  = 0x000f1f0c;
 static const uintptr_t kYTKMasterFeatureFlagPatchOffset = 0x00039808;
 static const uintptr_t kYTKDownloadFeatureGateOffset    = 0x0000683c;
-static const uintptr_t kYTKPlaybackQualityGateOffset    = 0x0000998c;
 static const uintptr_t kYTKAdsFeatureGateOffset         = 0x0000c2f4;
-static const uintptr_t kYTKOverlayControlsGateOffset    = 0x0002f560;
-static const uintptr_t kYTKMainInitializerGateOffset    = 0x00048a38;
-static const uintptr_t kYTKLateFeatureGateOffset        = 0x0008f0c8;
-static const uintptr_t kYTKSecondaryActivationGateOffset = 0x000c68a0;
 
 static NSString *ytk_logPath(void) {
     return [NSTemporaryDirectory() stringByAppendingPathComponent:@"ytkcore-debug.log"];
@@ -256,6 +251,48 @@ static void ytk_logFeaturePrefs(NSString *reason) {
             [parts componentsJoinedByString:@" "]);
 }
 
+static void ytk_logOverlayDiagnostics(NSString *reason) {
+    NSArray<NSString *> *classNames = @[
+        @"YTMainAppControlsOverlayView",
+        @"YTMainAppVideoPlayerOverlayViewController",
+        @"YTMainAppVideoPlayerOverlayView",
+        @"YTInlinePlayerBarContainerView"
+    ];
+    for (NSString *className in classNames) {
+        Class cls = NSClassFromString(className);
+        ytk_log(@"overlay diag reason=%@ class=%@ exists=%@",
+                reason ?: @"nil",
+                className,
+                cls ? @"YES" : @"NO");
+        if (!cls) continue;
+
+        NSArray<NSString *> *selectors = @[
+            @"initWithDelegate:",
+            @"setOverlayVisible:",
+            @"topControlsAccessibilityContainerView",
+            @"ytkControls",
+            @"setYtkControls:",
+            @"handleYTKDownloadButton:",
+            @"handleYTKPiPButton:",
+            @"iosPlayerWithPlayer",
+            @"setupVolumeAndBrightnessGestures",
+            @"handleVolumeGesture:",
+            @"handleBrightnessGesture:"
+        ];
+        NSMutableArray<NSString *> *parts = [NSMutableArray array];
+        for (NSString *selectorName in selectors) {
+            SEL sel = sel_registerName(selectorName.UTF8String);
+            BOOL instanceHas = class_getInstanceMethod(cls, sel) != NULL;
+            BOOL responds = class_getMethodImplementation(cls, sel) != _objc_msgForward;
+            [parts addObject:[NSString stringWithFormat:@"%@=%@/%@",
+                              selectorName,
+                              instanceHas ? @"M" : @"-",
+                              responds ? @"I" : @"-"]];
+        }
+        ytk_log(@"overlay diag methods class=%@ %@", className, [parts componentsJoinedByString:@" "]);
+    }
+}
+
 static void scheduleLaunchReseeds(void) {
     NSArray<NSNumber *> *delays = @[ @0.25, @1.0, @3.0, @8.0 ];
     for (NSNumber *delay in delays) {
@@ -267,6 +304,7 @@ static void scheduleLaunchReseeds(void) {
                 ytk_patchStartupFeatureGates([NSString stringWithFormat:@"launch +%.2fs", delay.doubleValue]);
             }
             ytk_logFeaturePrefs([NSString stringWithFormat:@"launch +%.2fs", delay.doubleValue]);
+            ytk_logOverlayDiagnostics([NSString stringWithFormat:@"launch +%.2fs", delay.doubleValue]);
         });
     }
 
@@ -280,6 +318,7 @@ static void scheduleLaunchReseeds(void) {
             ytk_patchStartupFeatureGates(@"app became active");
         }
         ytk_logFeaturePrefs(@"app became active");
+        ytk_logOverlayDiagnostics(@"app became active");
     }];
 }
 
@@ -447,12 +486,7 @@ static BOOL gActivationGuardPatched = NO;
 static BOOL gRootOptionsValidationPatched = NO;
 static BOOL gMasterFeatureFlagPatched = NO;
 static BOOL gDownloadFeatureGatePatched = NO;
-static BOOL gPlaybackQualityGatePatched = NO;
 static BOOL gAdsFeatureGatePatched = NO;
-static BOOL gOverlayControlsGatePatched = NO;
-static BOOL gMainInitializerGatePatched = NO;
-static BOOL gLateFeatureGatePatched = NO;
-static BOOL gSecondaryActivationGatePatched = NO;
 
 static BOOL ytk_patchYTKInstruction(uintptr_t offset,
                                     uint32_t replacement,
@@ -535,40 +569,10 @@ static BOOL ytk_patchDownloadFeatureGateReturnYES(void) {
                                          &gDownloadFeatureGatePatched);
 }
 
-static BOOL ytk_patchPlaybackQualityGateReturnYES(void) {
-    return ytk_patchYTKFunctionReturnYES(kYTKPlaybackQualityGateOffset,
-                                         @"playback quality feature gate",
-                                         &gPlaybackQualityGatePatched);
-}
-
 static BOOL ytk_patchAdsFeatureGateReturnYES(void) {
     return ytk_patchYTKFunctionReturnYES(kYTKAdsFeatureGateOffset,
                                          @"ads feature gate",
                                          &gAdsFeatureGatePatched);
-}
-
-static BOOL ytk_patchOverlayControlsGateReturnYES(void) {
-    return ytk_patchYTKFunctionReturnYES(kYTKOverlayControlsGateOffset,
-                                         @"overlay controls feature gate",
-                                         &gOverlayControlsGatePatched);
-}
-
-static BOOL ytk_patchMainInitializerGateReturnYES(void) {
-    return ytk_patchYTKFunctionReturnYES(kYTKMainInitializerGateOffset,
-                                         @"main initializer feature gate",
-                                         &gMainInitializerGatePatched);
-}
-
-static BOOL ytk_patchLateFeatureGateReturnYES(void) {
-    return ytk_patchYTKFunctionReturnYES(kYTKLateFeatureGateOffset,
-                                         @"late feature gate",
-                                         &gLateFeatureGatePatched);
-}
-
-static BOOL ytk_patchSecondaryActivationGateReturnYES(void) {
-    return ytk_patchYTKFunctionReturnYES(kYTKSecondaryActivationGateOffset,
-                                         @"secondary activation gate",
-                                         &gSecondaryActivationGatePatched);
 }
 
 static BOOL ytk_patchMasterFeatureFlagReturnActive(void) {
@@ -583,24 +587,14 @@ static void ytk_patchStartupFeatureGates(NSString *reason) {
     BOOL activation = ytk_patchActivationGuardReturnYES();
     BOOL root = ytk_patchRootOptionsValidationReturnYES();
     BOOL download = ytk_patchDownloadFeatureGateReturnYES();
-    BOOL quality = ytk_patchPlaybackQualityGateReturnYES();
     BOOL ads = ytk_patchAdsFeatureGateReturnYES();
-    BOOL overlay = ytk_patchOverlayControlsGateReturnYES();
-    BOOL mainInit = ytk_patchMainInitializerGateReturnYES();
-    BOOL late = ytk_patchLateFeatureGateReturnYES();
-    BOOL secondary = ytk_patchSecondaryActivationGateReturnYES();
-    ytk_log(@"startup feature gates patched reason=%@ master=%@ activation=%@ root=%@ download=%@ quality=%@ ads=%@ overlay=%@ main=%@ late=%@ secondary=%@",
+    ytk_log(@"startup feature gates patched reason=%@ master=%@ activation=%@ root=%@ download=%@ ads=%@",
             reason ?: @"nil",
             master ? @"YES" : @"NO",
             activation ? @"YES" : @"NO",
             root ? @"YES" : @"NO",
             download ? @"YES" : @"NO",
-            quality ? @"YES" : @"NO",
-            ads ? @"YES" : @"NO",
-            overlay ? @"YES" : @"NO",
-            mainInit ? @"YES" : @"NO",
-            late ? @"YES" : @"NO",
-            secondary ? @"YES" : @"NO");
+            ads ? @"YES" : @"NO");
 }
 
 static BOOL ytk_presentRootOptionsFallback(UIViewController *host) {
@@ -1096,6 +1090,8 @@ static void (*orig_rootViewDidAppear)(id, SEL, BOOL) = NULL;
 static void ytk_rootViewDidAppear_hook(id self, SEL _cmd, BOOL animated) {
     if (orig_rootViewDidAppear) orig_rootViewDidAppear(self, _cmd, animated);
     ytk_applyRootOptionsVisuals(self);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ ytk_applyRootOptionsVisuals(self); });
 }
 
 static void (*orig_rootViewDidLayoutSubviews)(id, SEL) = NULL;
@@ -1206,12 +1202,13 @@ static void ytk_dyldCallback(const struct mach_header *mh, intptr_t slide) {
     preseedLaunchActivationState(@"YTKPlus image callback");
     ytk_seedPrivateActivationGate();
     ytk_patchStartupFeatureGates(@"YTKPlus image callback");
+    ytk_logOverlayDiagnostics(@"YTKPlus image callback");
 }
 
 __attribute__((constructor))
 static void init(void) {
     [[NSFileManager defaultManager] removeItemAtPath:ytk_logPath() error:nil];
-    ytk_log(@"boot v6.5-ytkplus-5.7.1 constructor entered");
+    ytk_log(@"boot v6.6-ytkplus-5.7.1 constructor entered");
 
     preseedKeychain();
     ytk_log(@"preseed done");
